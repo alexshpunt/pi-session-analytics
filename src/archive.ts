@@ -153,6 +153,29 @@ export class SessionArchive {
 		};
 	}
 
+	/** Read only the bytes introduced by one generation in source order. */
+	read_generation_segment(
+		generation_id: number,
+		on_chunk: (bytes: Buffer, source_offset: number) => void,
+	): void {
+		this.required_generation(generation_id);
+		for (const chunk of this.db.get_archive_generation_chunks(
+			generation_id,
+		)) {
+			const bytes = readFileSync(this.chunk_path(chunk.chunk_hash));
+			if (
+				bytes.length !== chunk.size_bytes ||
+				createHash('sha256').update(bytes).digest('hex') !==
+					chunk.chunk_hash
+			) {
+				throw new Error(
+					`Archived chunk ${chunk.chunk_hash} failed verification`,
+				);
+			}
+			on_chunk(bytes, chunk.source_offset);
+		}
+	}
+
 	/** Restore one committed archive generation exactly to a destination file. */
 	restore_generation(
 		generation_id: number,

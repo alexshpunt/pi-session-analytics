@@ -88,6 +88,62 @@ export interface ArchiveGenerationChunkRecord {
 	size_bytes: number;
 }
 
+/** Lossless common and typed fields for one archived JSONL record. */
+export interface SessionRecordInsert {
+	archive_generation_id: number;
+	source_path: string;
+	session_id: string;
+	record_index: number;
+	source_byte_offset: number;
+	source_byte_length: number;
+	record_type: string;
+	entry_id?: string;
+	parent_id?: string;
+	timestamp?: number;
+	raw_json: string;
+	parse_error?: string;
+	session_version?: number;
+	cwd?: string;
+	parent_session_path?: string;
+	message_role?: string;
+	content_text?: string;
+	content_json?: string;
+	details_json?: string;
+	data_json?: string;
+	usage_json?: string;
+	provider?: string;
+	model?: string;
+	api?: string;
+	stop_reason?: string;
+	error_message?: string;
+	thinking_level?: string;
+	custom_type?: string;
+
+	display?: boolean;
+	from_hook?: boolean;
+	retained_tail_json?: string;
+	summary?: string;
+	tokens_before?: number;
+	first_kept_entry_id?: string;
+	from_id?: string;
+	target_id?: string;
+	label?: string;
+	name?: string;
+	tool_call_id?: string;
+	tool_name?: string;
+	is_error?: boolean;
+	input_tokens?: number;
+	output_tokens?: number;
+	cache_read_tokens?: number;
+	cache_write_tokens?: number;
+	total_tokens?: number;
+	cost_input?: number;
+	cost_output?: number;
+	cost_cache_read?: number;
+	cost_cache_write?: number;
+	cost_total?: number;
+}
+
 export class Database {
 	private db: DatabaseSync;
 	private db_path: string;
@@ -501,6 +557,251 @@ export class Database {
 				)
 				.get() as { count: number }
 		).count;
+	}
+
+	/** Return archive generations that have not been indexed into canonical records. */
+	list_unindexed_archive_generations(): ArchiveGenerationRecord[] {
+		return this.db
+			.prepare(
+				`SELECT g.* FROM archive_generations g
+				LEFT JOIN record_index_state s ON s.archive_generation_id = g.id
+				WHERE s.archive_generation_id IS NULL
+				ORDER BY g.id`,
+			)
+			.all() as unknown as ArchiveGenerationRecord[];
+	}
+
+	/** Insert one canonical record and return its contextual database ID. */
+	insert_session_record(record: SessionRecordInsert): number {
+		const columns = [
+			'archive_generation_id',
+			'source_path',
+			'session_id',
+			'record_index',
+			'source_byte_offset',
+			'source_byte_length',
+			'record_type',
+			'entry_id',
+			'parent_id',
+			'timestamp',
+			'raw_json',
+			'parse_error',
+			'session_version',
+			'cwd',
+			'parent_session_path',
+			'message_role',
+			'content_text',
+			'content_json',
+			'details_json',
+			'data_json',
+			'usage_json',
+			'provider',
+			'model',
+			'api',
+			'stop_reason',
+			'error_message',
+			'thinking_level',
+			'custom_type',
+			'display',
+			'from_hook',
+			'retained_tail_json',
+			'summary',
+			'tokens_before',
+			'first_kept_entry_id',
+			'from_id',
+			'target_id',
+			'label',
+			'name',
+			'tool_call_id',
+			'tool_name',
+			'is_error',
+			'input_tokens',
+			'output_tokens',
+			'cache_read_tokens',
+			'cache_write_tokens',
+			'total_tokens',
+			'cost_input',
+			'cost_output',
+			'cost_cache_read',
+			'cost_cache_write',
+			'cost_total',
+		] as const;
+		const values = [
+			record.archive_generation_id,
+			record.source_path,
+			record.session_id,
+			record.record_index,
+			record.source_byte_offset,
+			record.source_byte_length,
+			record.record_type,
+			record.entry_id ?? null,
+			record.parent_id ?? null,
+			record.timestamp ?? null,
+			record.raw_json,
+			record.parse_error ?? null,
+			record.session_version ?? null,
+			record.cwd ?? null,
+			record.parent_session_path ?? null,
+			record.message_role ?? null,
+			record.content_text ?? null,
+			record.content_json ?? null,
+			record.details_json ?? null,
+			record.data_json ?? null,
+			record.usage_json ?? null,
+			record.provider ?? null,
+			record.model ?? null,
+			record.api ?? null,
+			record.stop_reason ?? null,
+			record.error_message ?? null,
+			record.thinking_level ?? null,
+			record.custom_type ?? null,
+			record.display === undefined ? null : Number(record.display),
+			record.from_hook === undefined
+				? null
+				: Number(record.from_hook),
+			record.retained_tail_json ?? null,
+			record.summary ?? null,
+			record.tokens_before ?? null,
+			record.first_kept_entry_id ?? null,
+			record.from_id ?? null,
+			record.target_id ?? null,
+			record.label ?? null,
+			record.name ?? null,
+			record.tool_call_id ?? null,
+			record.tool_name ?? null,
+			record.is_error === undefined ? null : Number(record.is_error),
+			record.input_tokens ?? 0,
+			record.output_tokens ?? 0,
+			record.cache_read_tokens ?? 0,
+			record.cache_write_tokens ?? 0,
+			record.total_tokens ?? 0,
+			record.cost_input ?? 0,
+			record.cost_output ?? 0,
+			record.cost_cache_read ?? 0,
+			record.cost_cache_write ?? 0,
+			record.cost_total ?? 0,
+		];
+		const result = this.db
+			.prepare(
+				`INSERT INTO session_records (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+			)
+			.run(...values);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert one ordered message content block without losing its raw JSON. */
+	insert_record_content_block(block: {
+		record_id: number;
+		block_index: number;
+		type: string;
+		text?: string;
+		thinking?: string;
+		mime_type?: string;
+		tool_call_id?: string;
+		tool_name?: string;
+		arguments_json?: string;
+		raw_json: string;
+	}): void {
+		this.db
+			.prepare(
+				`INSERT INTO record_content_blocks (
+					record_id, block_index, type, text, thinking, mime_type,
+					tool_call_id, tool_name, arguments_json, raw_json
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				block.record_id,
+				block.block_index,
+				block.type,
+				block.text ?? null,
+				block.thinking ?? null,
+				block.mime_type ?? null,
+				block.tool_call_id ?? null,
+				block.tool_name ?? null,
+				block.arguments_json ?? null,
+				block.raw_json,
+			);
+	}
+
+	/** Insert one contextual tool call extracted from a content block. */
+	insert_record_tool_call(call: {
+		record_id: number;
+		block_index: number;
+		source_path: string;
+		session_id: string;
+		tool_call_id: string;
+		tool_name: string;
+		arguments_json: string;
+	}): void {
+		this.db
+			.prepare(
+				`INSERT INTO record_tool_calls (
+					record_id, block_index, source_path, session_id,
+					tool_call_id, tool_name, arguments_json
+				) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				call.record_id,
+				call.block_index,
+				call.source_path,
+				call.session_id,
+				call.tool_call_id,
+				call.tool_name,
+				call.arguments_json,
+			);
+	}
+
+	/** Insert one contextual tool result extracted from a message record. */
+	insert_record_tool_result(result: {
+		record_id: number;
+		source_path: string;
+		session_id: string;
+		tool_call_id: string;
+		tool_name: string;
+		content_text?: string;
+		content_json: string;
+		details_json?: string;
+		is_error: boolean;
+	}): void {
+		this.db
+			.prepare(
+				`INSERT INTO record_tool_results (
+					record_id, source_path, session_id, tool_call_id,
+					tool_name, content_text, content_json, details_json, is_error
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				result.record_id,
+				result.source_path,
+				result.session_id,
+				result.tool_call_id,
+				result.tool_name,
+				result.content_text ?? null,
+				result.content_json,
+				result.details_json ?? null,
+				Number(result.is_error),
+			);
+	}
+
+	/** Mark one archive generation fully indexed into canonical records. */
+	mark_record_generation_indexed(
+		archive_generation_id: number,
+		records_count: number,
+		invalid_count: number,
+		indexed_at: number,
+	): void {
+		this.db
+			.prepare(
+				`INSERT INTO record_index_state (
+					archive_generation_id, records_count, invalid_count, indexed_at
+				) VALUES (?, ?, ?, ?)`,
+			)
+			.run(
+				archive_generation_id,
+				records_count,
+				invalid_count,
+				indexed_at,
+			);
 	}
 
 	get_sync_state(file_path: string): SyncState | undefined {

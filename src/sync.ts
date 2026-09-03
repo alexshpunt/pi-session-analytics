@@ -14,6 +14,11 @@ import { DEFAULT_ARCHIVE_DIR, SessionArchive } from './archive.ts';
 import { Database } from './db.ts';
 import { parse_file } from './parser.ts';
 
+import {
+	CanonicalRecordIndexer,
+	type RecordIndexStats,
+} from './records.ts';
+
 const SESSIONS_DIR = join(
 	process.env.HOME!,
 	'.pi',
@@ -52,6 +57,8 @@ export interface SyncResult {
 	discovery: SessionDiscoveryStats;
 
 	archive: ArchiveSyncStats;
+
+	records: RecordIndexStats;
 }
 
 /** Discover and incrementally import each native Pi session under a sessions root. */
@@ -88,9 +95,13 @@ export async function sync(
 			bytes_added: 0,
 			sources_missing: 0,
 		},
+
+		records: { added: 0, invalid: 0 },
 	};
 
 	const archive = new SessionArchive(db, archive_dir);
+
+	const record_indexer = new CanonicalRecordIndexer(db, archive);
 	const seen_at = Date.now();
 
 	if (!existsSync(sessions_dir)) {
@@ -99,6 +110,9 @@ export async function sync(
 		}
 		db.begin();
 		db.mark_all_archive_sources_missing();
+
+		result.records =
+			record_indexer.index_pending_generations(seen_at);
 		result.archive.sources_missing =
 			db.count_missing_archive_sources();
 		db.commit();
@@ -306,6 +320,8 @@ export async function sync(
 			metadata_indexed || start_offset === 0,
 		);
 	}
+
+	result.records = record_indexer.index_pending_generations(seen_at);
 
 	db.mark_unseen_sources_missing(seen_at);
 

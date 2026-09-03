@@ -87,6 +87,9 @@ Done!
   Archive chunks:     ${result.archive.chunks_added}
   Archive bytes:      ${result.archive.bytes_added}
   Missing sources:    ${result.archive.sources_missing}
+
+  Records indexed:    ${result.records.added}
+  Invalid records:    ${result.records.invalid}
   Files processed:    ${result.files_processed}
   Messages added:     ${result.messages_added}
   Sessions added:     ${result.sessions_added}

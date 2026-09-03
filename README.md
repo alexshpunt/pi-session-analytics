@@ -69,6 +69,12 @@ Older archive generations remain available when Pi rewrites or deletes
 the source. Use `sync --archive <path>` to choose another archive
 location.
 
+SQLite table `session_records` keeps every archived JSONL record with
+its raw JSON, tree IDs, generation, source path, and exact byte range.
+Related `record_content_blocks`, `record_tool_calls`, and
+`record_tool_results` rows keep common fields directly queryable while
+IDs remain scoped to their source session.
+
 **Step 1.** Sync your sessions:
 
 ```bash
