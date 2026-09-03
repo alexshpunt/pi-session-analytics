@@ -127,6 +127,28 @@ range. `query --json` returns
 `{ schema_version, kind, sql, columns, count, rows }`. Both envelopes
 use `schema_version: 1`, including empty results.
 
+Tool reports use canonical archived records:
+
+```bash
+npx pi-session-analytics tools                       # calls and recorded outcomes
+npx pi-session-analytics tools failures              # grouped recorded errors
+npx pi-session-analytics tools arguments             # argument keys and value-free shapes
+npx pi-session-analytics tools --provider openai --model gpt-5.4 --after 2026-09-01
+```
+
+Every report accepts `--project`, `--session`, `--provider`,
+`--model`, `--after`, and `--before`. JSON output uses the versioned
+`tool-summary`, `tool-failures`, or `tool-arguments` envelope. Failure
+and argument groups include exact canonical record and archive byte
+provenance. Argument reports keep keys and data types, not argument
+values.
+
+Reports use each source's effective history: append generations add
+only their suffix, while a rewrite replaces the earlier snapshot. This
+keeps archived history intact without counting unchanged calls twice.
+A missing result is reported as incomplete, never guessed to be a
+failure.
+
 ## Schema migrations
 
 `src/schema.sql` creates the base database schema. `src/schema.ts`

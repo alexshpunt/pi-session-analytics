@@ -5,7 +5,7 @@ const SCHEMA = readFileSync(
 	new URL('./schema.sql', import.meta.url),
 	'utf8',
 );
-const LATEST_SCHEMA_VERSION = 6;
+const LATEST_SCHEMA_VERSION = 7;
 const MIGRATIONS: Record<number, string> = {
 	2: readFileSync(
 		new URL(
@@ -37,6 +37,14 @@ const MIGRATIONS: Record<number, string> = {
 
 	6: readFileSync(
 		new URL('./migrations/006_record_search.sql', import.meta.url),
+		'utf8',
+	),
+
+	7: readFileSync(
+		new URL(
+			'./migrations/007_effective_records.sql',
+			import.meta.url,
+		),
 		'utf8',
 	),
 };

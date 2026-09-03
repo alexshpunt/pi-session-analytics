@@ -24,7 +24,7 @@ describe('pi-session-analytics schema', () => {
 	test('creates a fresh database and applies migrations', () => {
 		const db = new DatabaseSync(':memory:');
 		apply_schema(db);
-		expect(user_version(db)).toBe(6);
+		expect(user_version(db)).toBe(7);
 		const columns = (
 			db.prepare('PRAGMA table_info(sessions)').all() as Array<{
 				name: string;
@@ -61,6 +61,14 @@ describe('pi-session-analytics schema', () => {
 				)
 				.get(),
 		).toEqual({ name: 'session_records_fts' });
+
+		expect(
+			db
+				.prepare(
+					"SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'effective_session_records'",
+				)
+				.get(),
+		).toEqual({ name: 'effective_session_records' });
 		db.close();
 	});
 
@@ -71,7 +79,7 @@ describe('pi-session-analytics schema', () => {
 			'INSERT INTO sessions (id, project_path) VALUES (?, ?)',
 		).run('legacy', '/tmp/legacy');
 		apply_schema(db);
-		expect(user_version(db)).toBe(6);
+		expect(user_version(db)).toBe(7);
 		expect(db.prepare('SELECT id FROM sessions').get()).toEqual({
 			id: 'legacy',
 		});
@@ -86,7 +94,7 @@ describe('pi-session-analytics schema', () => {
 			'INSERT INTO sessions (id, project_path, source_path) VALUES (?, ?, ?)',
 		).run('resumable', '/tmp/project', '/tmp/session.jsonl');
 		apply_schema(db);
-		expect(user_version(db)).toBe(6);
+		expect(user_version(db)).toBe(7);
 		expect(
 			db.prepare('SELECT source_path FROM sessions').get(),
 		).toEqual({ source_path: '/tmp/session.jsonl' });
@@ -95,7 +103,7 @@ describe('pi-session-analytics schema', () => {
 
 	test('rejects schemas newer than this package', () => {
 		const db = new DatabaseSync(':memory:');
-		db.exec('PRAGMA user_version = 7');
+		db.exec('PRAGMA user_version = 8');
 		expect(() => apply_schema(db)).toThrow('newer than supported');
 		db.close();
 	});

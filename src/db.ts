@@ -164,6 +164,41 @@ export interface CanonicalSearchResult {
 	relevance: number;
 }
 
+/** Filters shared by every canonical tool activity report. */
+export interface ToolActivityFilters {
+	project?: string;
+	session?: string;
+	provider?: string;
+	model?: string;
+	after?: number;
+	before?: number;
+}
+
+/** One effective tool call and its recorded result, with archive provenance. */
+export interface ToolActivityRecord {
+	call_record_id: number;
+	result_record_id: number | null;
+	session_id: string;
+	project_path: string;
+	source_path: string;
+	archive_generation_id: number;
+	tool_call_id: string;
+	tool_name: string;
+	arguments_json: string;
+	provider: string | null;
+	model: string | null;
+	timestamp: number | null;
+	source_byte_offset: number;
+	source_byte_length: number;
+	result_archive_generation_id: number | null;
+	result_timestamp: number | null;
+	result_source_byte_offset: number | null;
+	result_source_byte_length: number | null;
+	result_content: string | null;
+	result_details_json: string | null;
+	is_error: number | null;
+}
+
 export class Database {
 	private db: DatabaseSync;
 	private db_path: string;
@@ -1365,6 +1400,91 @@ export class Database {
 				LIMIT ? OFFSET ?
 			`)
 			.all(...params);
+	}
+
+	/** Return effective canonical tool calls and their recorded outcomes. */
+	get_tool_activity(
+		filters: ToolActivityFilters = {},
+	): ToolActivityRecord[] {
+		const conditions: string[] = [];
+		const params: Array<string | number> = [];
+		if (filters.project) {
+			conditions.push("COALESCE(projects.project_path, '') LIKE ?");
+			params.push(`%${filters.project}%`);
+		}
+		if (filters.session) {
+			conditions.push('calls.session_id LIKE ?');
+			params.push(`${filters.session}%`);
+		}
+		if (filters.provider) {
+			conditions.push('call_record.provider = ?');
+			params.push(filters.provider);
+		}
+		if (filters.model) {
+			conditions.push('call_record.model = ?');
+			params.push(filters.model);
+		}
+		if (filters.after !== undefined) {
+			conditions.push('call_record.timestamp >= ?');
+			params.push(filters.after);
+		}
+		if (filters.before !== undefined) {
+			conditions.push('call_record.timestamp < ?');
+			params.push(filters.before);
+		}
+		const where =
+			conditions.length > 0
+				? `WHERE ${conditions.join(' AND ')}`
+				: '';
+		return this.db
+			.prepare(
+				`WITH source_projects AS (
+					SELECT source_path,
+						MAX(CASE WHEN record_type = 'session' THEN cwd END) AS project_path
+					FROM effective_session_records
+					GROUP BY source_path
+				), effective_results AS (
+					SELECT results.*, result_record.archive_generation_id,
+						result_record.timestamp, result_record.source_byte_offset,
+						result_record.source_byte_length,
+						ROW_NUMBER() OVER (
+							PARTITION BY results.source_path, results.session_id, results.tool_call_id
+							ORDER BY result_record.timestamp, result_record.id
+						) AS result_number
+					FROM record_tool_results results
+					JOIN effective_session_records result_record
+						ON result_record.id = results.record_id
+				)
+				SELECT calls.record_id AS call_record_id,
+					results.record_id AS result_record_id,
+					calls.session_id,
+					COALESCE(projects.project_path, '') AS project_path,
+					calls.source_path,
+					call_record.archive_generation_id,
+					calls.tool_call_id, calls.tool_name, calls.arguments_json,
+					call_record.provider, call_record.model, call_record.timestamp,
+					call_record.source_byte_offset, call_record.source_byte_length,
+					results.archive_generation_id AS result_archive_generation_id,
+					results.timestamp AS result_timestamp,
+					results.source_byte_offset AS result_source_byte_offset,
+					results.source_byte_length AS result_source_byte_length,
+					COALESCE(results.content_text, results.content_json) AS result_content,
+					results.details_json AS result_details_json,
+					results.is_error
+				FROM record_tool_calls calls
+				JOIN effective_session_records call_record
+					ON call_record.id = calls.record_id
+				LEFT JOIN source_projects projects
+					ON projects.source_path = calls.source_path
+				LEFT JOIN effective_results results
+					ON results.source_path = calls.source_path
+					AND results.session_id = calls.session_id
+					AND results.tool_call_id = calls.tool_call_id
+					AND results.result_number = 1
+				${where}
+				ORDER BY call_record.timestamp, calls.source_path, calls.record_id, calls.block_index`,
+			)
+			.all(...params) as unknown as ToolActivityRecord[];
 	}
 
 	get_tool_stats(

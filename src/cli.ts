@@ -295,68 +295,193 @@ export const query = defineCommand({
 export const tools = defineCommand({
 	meta: {
 		name: 'tools',
-		description: 'Show most-used tools',
+		description:
+			'Report tool usage, failures, and argument structure',
 	},
 	args: {
 		...shared_args,
+		_: {
+			type: 'positional' as const,
+			description:
+				'Report: summary (default), failures, or arguments',
+			required: false,
+		},
 		top: {
 			type: 'string',
 			alias: 't',
-			description: 'Number of tools to show (default: 10)',
+			description: 'Number of report rows to show (default: 10)',
 		},
 		project: {
 			type: 'string',
 			alias: 'p',
 			description: 'Filter by project path',
 		},
+		session: {
+			type: 'string',
+			description: 'Filter by session ID prefix',
+		},
+		provider: {
+			type: 'string',
+			description: 'Filter by provider',
+		},
+		model: {
+			type: 'string',
+			description: 'Filter by model',
+		},
+		after: {
+			type: 'string',
+			description: 'Include calls at or after this ISO date',
+		},
+		before: {
+			type: 'string',
+			description: 'Include calls before this ISO date',
+		},
 	},
 	async run({ args }) {
 		const { Database } = await import('./db.ts');
-
-		const db_path = args.db ?? DEFAULT_DB_PATH;
-		const db = new Database(db_path);
-
+		const {
+			group_tool_failures,
+			report_tool_arguments,
+			summarize_tools,
+		} = await import('./tool-reports.ts');
+		const raw_report = args._ as string | string[] | undefined;
+		const report = Array.isArray(raw_report)
+			? raw_report[0]
+			: (raw_report ?? 'summary');
+		if (!['summary', 'failures', 'arguments'].includes(report)) {
+			throw new Error(
+				`Unknown tool report "${report}"; use summary, failures, or arguments`,
+			);
+		}
+		const limit = args.top ? parseInt(args.top, 10) : 10;
+		const filters = {
+			project: args.project,
+			session: args.session,
+			provider: args.provider,
+			model: args.model,
+			after: args.after ? new Date(args.after).getTime() : undefined,
+			before: args.before
+				? new Date(args.before).getTime()
+				: undefined,
+		};
+		const db = new Database(args.db ?? DEFAULT_DB_PATH);
 		try {
-			const results = db.get_tool_stats({
-				limit: args.top ? parseInt(args.top, 10) : undefined,
-				project: args.project,
-			});
-
-			if (results.length === 0) {
+			const activity = db.get_tool_activity(filters);
+			if (report === 'summary') {
+				const all_results = summarize_tools(activity);
+				const results = all_results.slice(0, limit);
+				const totals = all_results.reduce(
+					(total, row) => ({
+						calls: total.calls + row.calls,
+						matched_results:
+							total.matched_results + row.matched_results,
+						successes: total.successes + row.successes,
+						failures: total.failures + row.failures,
+						incomplete: total.incomplete + row.incomplete,
+					}),
+					{
+						calls: 0,
+						matched_results: 0,
+						successes: 0,
+						failures: 0,
+						incomplete: 0,
+					},
+				);
 				if (args.json) {
-					console.log('[]');
-				} else {
-					console.log('No tool usage data found.');
+					console.log(
+						JSON.stringify(
+							{
+								schema_version: 1,
+								kind: 'pi-session-analytics/tool-summary',
+								filters,
+								count: results.length,
+								totals,
+								results,
+							},
+							null,
+							2,
+						),
+					);
+					return;
+				}
+				if (results.length === 0) {
+					console.log('No tool calls found.');
+					return;
+				}
+				console.log(
+					'Tool  Calls  Results  Success  Failure  Incomplete  Failure %',
+				);
+				for (const row of results) {
+					console.log(
+						`${row.tool_name}  ${row.calls}  ${row.matched_results}  ${row.successes}  ${row.failures}  ${row.incomplete}  ${(row.failure_rate * 100).toFixed(1)}%`,
+					);
 				}
 				return;
 			}
-
-			if (args.json) {
-				console.log(JSON.stringify(results, null, 2));
+			if (report === 'failures') {
+				const results = group_tool_failures(activity).slice(0, limit);
+				if (args.json) {
+					console.log(
+						JSON.stringify(
+							{
+								schema_version: 1,
+								kind: 'pi-session-analytics/tool-failures',
+								filters,
+								count: results.length,
+								results,
+							},
+							null,
+							2,
+						),
+					);
+					return;
+				}
+				if (results.length === 0) {
+					console.log('No recorded tool failures found.');
+					return;
+				}
+				console.log('Tool  Count  Fingerprint  Evidence');
+				for (const row of results) {
+					console.log(
+						`${row.tool_name}  ${row.count}  ${row.fingerprint}  ${row.evidence.slice(0, 100)}`,
+					);
+				}
 				return;
 			}
-
-			const max_name_len = Math.max(
-				4,
-				...results.map((r) => r.tool_name.length),
-			);
-			const max_count_len = Math.max(
-				5,
-				...results.map((r) => r.count.toString().length),
-			);
-
-			console.log(
-				`${'Tool'.padEnd(max_name_len)}  ${'Count'.padStart(max_count_len)}  %`,
-			);
-			console.log(
-				`${'-'.repeat(max_name_len)}  ${'-'.repeat(max_count_len)}  ------`,
-			);
-
-			for (const r of results) {
+			const argument_report = report_tool_arguments(activity);
+			const results = {
+				keys: argument_report.keys.slice(0, limit),
+				shapes: argument_report.shapes.slice(0, limit),
+			};
+			if (args.json) {
 				console.log(
-					`${r.tool_name.padEnd(max_name_len)}  ${r.count.toString().padStart(max_count_len)}  ${r.percentage.toFixed(1).padStart(5)}%`,
+					JSON.stringify(
+						{
+							schema_version: 1,
+							kind: 'pi-session-analytics/tool-arguments',
+							filters,
+							count: {
+								keys: results.keys.length,
+								shapes: results.shapes.length,
+							},
+							results,
+						},
+						null,
+						2,
+					),
 				);
+				return;
 			}
+			if (results.keys.length === 0 && results.shapes.length === 0) {
+				console.log('No tool arguments found.');
+				return;
+			}
+			console.log('Argument keys');
+			for (const row of results.keys)
+				console.log(`${row.tool_name}  ${row.calls}  ${row.key}`);
+			console.log('\nArgument shapes');
+			for (const row of results.shapes)
+				console.log(`${row.tool_name}  ${row.calls}  ${row.shape}`);
 		} finally {
 			db.close();
 		}
