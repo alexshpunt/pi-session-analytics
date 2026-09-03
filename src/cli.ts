@@ -488,6 +488,304 @@ export const tools = defineCommand({
 	},
 });
 
+export const recoveries = defineCommand({
+	meta: {
+		name: 'recoveries',
+		description:
+			'Report inferred recovery after recorded tool failures',
+	},
+	args: {
+		group: {
+			type: 'string',
+			description:
+				'Compare by model (default), provider, project, tool, or day',
+		},
+		...shared_args,
+		project: {
+			type: 'string',
+			alias: 'p',
+			description: 'Filter by project path',
+		},
+		session: {
+			type: 'string',
+			description: 'Filter by session ID prefix',
+		},
+		provider: {
+			type: 'string',
+			description: 'Filter by failure provider',
+		},
+		model: { type: 'string', description: 'Filter by failure model' },
+		after: {
+			type: 'string',
+			description: 'Include failures at or after this ISO date',
+		},
+		before: {
+			type: 'string',
+			description: 'Include failures before this ISO date',
+		},
+	},
+	async run({ args }) {
+		const { Database } = await import('./db.ts');
+		const { group_recoveries, infer_recoveries } =
+			await import('./recovery-usage-reports.ts');
+		const group = (args.group ?? 'model') as
+			| 'model'
+			| 'provider'
+			| 'project'
+			| 'tool'
+			| 'day';
+		if (
+			!['model', 'provider', 'project', 'tool', 'day'].includes(group)
+		)
+			throw new Error(
+				`Unknown recovery group "${group}"; use model, provider, project, tool, or day`,
+			);
+		const filters = {
+			project: args.project,
+			session: args.session,
+			provider: args.provider,
+			model: args.model,
+			after: args.after ? new Date(args.after).getTime() : undefined,
+			before: args.before
+				? new Date(args.before).getTime()
+				: undefined,
+		};
+		const db = new Database(args.db ?? DEFAULT_DB_PATH);
+		try {
+			const results = infer_recoveries(
+				db.get_recovery_activity(),
+				db.get_user_turn_boundaries(),
+				filters,
+			);
+			const totals = results.reduce(
+				(total, row) => {
+					total.failures++;
+					if (row.classification === 'same-tool-recovery')
+						total.same_tool++;
+					else if (row.classification === 'alternate-tool-recovery')
+						total.alternate_tool++;
+					else total.unresolved++;
+					return total;
+				},
+				{
+					failures: 0,
+					same_tool: 0,
+					alternate_tool: 0,
+					unresolved: 0,
+				},
+			);
+			const groups = group_recoveries(results, group);
+			const heuristic =
+				'Inferred: before the next user message, prefer the first successful retry of the same tool; otherwise use the first successful alternate tool; otherwise unresolved.';
+			if (args.json) {
+				console.log(
+					JSON.stringify(
+						{
+							schema_version: 1,
+							kind: 'pi-session-analytics/inferred-recoveries',
+							inferred: true,
+							heuristic,
+							filters,
+
+							group,
+							groups,
+							count: results.length,
+							totals,
+							results,
+						},
+						null,
+						2,
+					),
+				);
+				return;
+			}
+			console.log(heuristic);
+			if (results.length === 0) {
+				console.log('No recorded tool failures found.');
+				return;
+			}
+			console.log(
+				`${group}  Failures  Same tool  Alternate  Unresolved  Inferred %`,
+			);
+			for (const row of groups) {
+				console.log(
+					`${row.value}  ${row.failures}  ${row.same_tool}  ${row.alternate_tool}  ${row.unresolved}  ${(row.inferred_recovery_rate * 100).toFixed(1)}%`,
+				);
+			}
+			console.log('');
+			console.log(
+				'Failure tool  Classification  Recovery tool  Intervening',
+			);
+			for (const row of results) {
+				console.log(
+					`${row.failure_tool}  ${row.classification}  ${row.recovery_tool ?? '-'}  ${row.intervening_tool_calls}`,
+				);
+			}
+		} finally {
+			db.close();
+		}
+	},
+});
+
+export const usage = defineCommand({
+	meta: {
+		name: 'usage',
+		description: 'Compare recorded tokens and cost',
+	},
+	args: {
+		...shared_args,
+		group: {
+			type: 'string',
+			description:
+				'Group by model (default), provider, project, or day',
+		},
+		details: {
+			type: 'boolean',
+			description:
+				'Include every contributing record with archive provenance',
+		},
+		top: {
+			type: 'string',
+			alias: 't',
+			description: 'Number of groups to show (default: 20)',
+		},
+		project: {
+			type: 'string',
+			alias: 'p',
+			description: 'Filter by project path',
+		},
+		session: {
+			type: 'string',
+			description: 'Filter by session ID prefix',
+		},
+		provider: { type: 'string', description: 'Filter by provider' },
+		model: { type: 'string', description: 'Filter by model' },
+		after: {
+			type: 'string',
+			description: 'Include usage at or after this ISO date',
+		},
+		before: {
+			type: 'string',
+			description: 'Include usage before this ISO date',
+		},
+	},
+	async run({ args }) {
+		const { Database } = await import('./db.ts');
+		const { group_usage } =
+			await import('./recovery-usage-reports.ts');
+		const group = (args.group ?? 'model') as
+			| 'model'
+			| 'provider'
+			| 'project'
+			| 'day';
+		if (!['model', 'provider', 'project', 'day'].includes(group))
+			throw new Error(
+				`Unknown usage group "${group}"; use model, provider, project, or day`,
+			);
+		const filters = {
+			project: args.project,
+			session: args.session,
+			provider: args.provider,
+			model: args.model,
+			after: args.after ? new Date(args.after).getTime() : undefined,
+			before: args.before
+				? new Date(args.before).getTime()
+				: undefined,
+		};
+		const db = new Database(args.db ?? DEFAULT_DB_PATH);
+		try {
+			const activity = db.get_usage_activity(filters);
+			const limit = args.top ? parseInt(args.top, 10) : 20;
+			const grouped = group_usage(activity, group).slice(0, limit);
+			const results = grouped.map((row) => {
+				if (args.details) return row;
+				const { details: _details, ...summary } = row;
+				return summary;
+			});
+			const raw_totals = activity.reduce(
+				(total, row) => {
+					total.messages++;
+					total.input_tokens += row.input_tokens;
+					total.output_tokens += row.output_tokens;
+					total.cache_read_tokens += row.cache_read_tokens;
+					total.cache_write_tokens += row.cache_write_tokens;
+					total.total_tokens += row.total_tokens;
+					if (row.cost_recorded === 1) {
+						total.priced_messages++;
+						total.cost_input += row.cost_input;
+						total.cost_output += row.cost_output;
+						total.cost_cache_read += row.cost_cache_read;
+						total.cost_cache_write += row.cost_cache_write;
+						total.cost_total += row.cost_total;
+					} else total.unpriced_messages++;
+					return total;
+				},
+				{
+					messages: 0,
+					priced_messages: 0,
+					unpriced_messages: 0,
+					input_tokens: 0,
+					output_tokens: 0,
+					cache_read_tokens: 0,
+					cache_write_tokens: 0,
+					total_tokens: 0,
+					cost_input: 0,
+					cost_output: 0,
+					cost_cache_read: 0,
+					cost_cache_write: 0,
+					cost_total: 0,
+				},
+			);
+			const totals =
+				raw_totals.priced_messages === 0
+					? {
+							...raw_totals,
+							cost_input: null,
+							cost_output: null,
+							cost_cache_read: null,
+							cost_cache_write: null,
+							cost_total: null,
+						}
+					: raw_totals;
+			if (args.json) {
+				console.log(
+					JSON.stringify(
+						{
+							schema_version: 1,
+							kind: 'pi-session-analytics/recorded-usage',
+							recorded_only: true,
+							group,
+							filters,
+							details_included: Boolean(args.details),
+							count: results.length,
+							totals,
+							results,
+						},
+						null,
+						2,
+					),
+				);
+				return;
+			}
+			console.log(
+				'Recorded usage only; no price or duration estimates.',
+			);
+			if (results.length === 0) {
+				console.log('No recorded usage found.');
+				return;
+			}
+			console.log(`${group}  Messages  Tokens  Cost`);
+			for (const row of grouped) {
+				console.log(
+					`${row.value}  ${row.messages}  ${row.total_tokens}  ${row.cost_total === null ? 'unknown' : row.cost_total.toFixed(6)}`,
+				);
+			}
+		} finally {
+			db.close();
+		}
+	},
+});
+
 export const search = defineCommand({
 	meta: {
 		name: 'search',
@@ -1106,6 +1404,9 @@ export const main = defineCommand({
 		sessions,
 		query,
 		tools,
+
+		recoveries,
+		usage,
 		recall,
 		resumable,
 		schema,

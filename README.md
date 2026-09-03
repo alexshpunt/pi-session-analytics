@@ -109,7 +109,9 @@ npx pi-session-analytics stats                 # Session/message/token/cost coun
 npx pi-session-analytics sessions              # List recent sessions
 npx pi-session-analytics resumable --json      # List live sessions for resume UIs
 npx pi-session-analytics search <term>         # Full-text search across all archived records
-npx pi-session-analytics tools                 # Most-used tools
+npx pi-session-analytics tools                 # Tool calls, failures, and argument shapes
+npx pi-session-analytics recoveries            # Inferred same-turn recovery sequences
+npx pi-session-analytics usage                 # Recorded tokens and cost comparisons
 npx pi-session-analytics recall <term>         # LLM-optimised context retrieval
 npx pi-session-analytics query "<sql>"         # Read-only SQL against the database
 npx pi-session-analytics schema                # Show database table structure
@@ -148,6 +150,39 @@ only their suffix, while a rewrite replaces the earlier snapshot. This
 keeps archived history intact without counting unchanged calls twice.
 A missing result is reported as incomplete, never guessed to be a
 failure.
+
+Recovery reports are deliberately labelled **inferred**. For each
+recorded tool failure, the report looks only until the next user
+message. It prefers the first successful retry of the same tool, then
+the first successful alternate tool, and otherwise reports the failure
+as unresolved. It reports intervening tool calls and exact provenance;
+it does not claim intent, causation, or time-to-recovery.
+
+```bash
+npx pi-session-analytics recoveries --group model
+npx pi-session-analytics recoveries --group project --after 2026-09-01
+```
+
+Recovery comparisons can group by model, provider, project, tool, or
+UTC day.
+
+Usage reports sum only the token and cost fields recorded by Pi:
+
+```bash
+npx pi-session-analytics usage --group model
+npx pi-session-analytics usage --group provider
+npx pi-session-analytics usage --group project
+npx pi-session-analytics usage --group day --after 2026-09-01 --before 2026-10-01
+npx pi-session-analytics usage --group model --details --json
+```
+
+The same time, session, project, provider, and model filters are
+available for `recoveries` and `usage`. Usage can include every
+contributing archive record with `--details`. Reports count priced and
+unpriced messages separately; cost is `null` when no contributing
+message recorded one. Missing prices are not looked up or estimated,
+and event timestamps are not presented as exact active-session
+duration.
 
 ## Schema migrations
 

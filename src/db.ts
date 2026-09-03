@@ -199,6 +199,45 @@ export interface ToolActivityRecord {
 	is_error: number | null;
 }
 
+/** Minimal effective tool timeline row used for recovery inference. */
+export type RecoveryActivityRecord = Omit<
+	ToolActivityRecord,
+	'arguments_json' | 'result_content' | 'result_details_json'
+>;
+
+/** One effective user-message boundary used by recovery inference. */
+export interface UserTurnBoundary {
+	source_path: string;
+	session_id: string;
+	record_id: number;
+	source_byte_offset: number;
+}
+
+/** Recorded assistant usage with exact canonical archive provenance. */
+export interface UsageActivityRecord {
+	record_id: number;
+	session_id: string;
+	project_path: string;
+	source_path: string;
+	archive_generation_id: number;
+	timestamp: number | null;
+	source_byte_offset: number;
+	source_byte_length: number;
+	provider: string | null;
+	model: string | null;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	total_tokens: number;
+	cost_recorded: number;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	cost_total: number;
+}
+
 export class Database {
 	private db: DatabaseSync;
 	private db_path: string;
@@ -1485,6 +1524,135 @@ export class Database {
 				ORDER BY call_record.timestamp, calls.source_path, calls.record_id, calls.block_index`,
 			)
 			.all(...params) as unknown as ToolActivityRecord[];
+	}
+
+	/** Return the effective tool timeline without loading argument or result payloads. */
+	get_recovery_activity(): RecoveryActivityRecord[] {
+		return this.db
+			.prepare(
+				`WITH source_projects AS (
+					SELECT source_path,
+						MAX(CASE WHEN record_type = 'session' THEN cwd END) AS project_path
+					FROM effective_session_records
+					GROUP BY source_path
+				), effective_results AS (
+					SELECT results.record_id, results.source_path, results.session_id,
+						results.tool_call_id, results.is_error,
+						result_record.archive_generation_id,
+						result_record.timestamp, result_record.source_byte_offset,
+						result_record.source_byte_length,
+						ROW_NUMBER() OVER (
+							PARTITION BY results.source_path, results.session_id, results.tool_call_id
+							ORDER BY result_record.timestamp, result_record.id
+						) AS result_number
+					FROM record_tool_results results
+					JOIN effective_session_records result_record
+						ON result_record.id = results.record_id
+				)
+				SELECT calls.record_id AS call_record_id,
+					results.record_id AS result_record_id,
+					calls.session_id,
+					COALESCE(projects.project_path, '') AS project_path,
+					calls.source_path, call_record.archive_generation_id,
+					calls.tool_call_id, calls.tool_name,
+					call_record.provider, call_record.model, call_record.timestamp,
+					call_record.source_byte_offset, call_record.source_byte_length,
+					results.archive_generation_id AS result_archive_generation_id,
+					results.timestamp AS result_timestamp,
+					results.source_byte_offset AS result_source_byte_offset,
+					results.source_byte_length AS result_source_byte_length,
+					results.is_error
+				FROM record_tool_calls calls
+				JOIN effective_session_records call_record
+					ON call_record.id = calls.record_id
+				LEFT JOIN source_projects projects
+					ON projects.source_path = calls.source_path
+				LEFT JOIN effective_results results
+					ON results.source_path = calls.source_path
+					AND results.session_id = calls.session_id
+					AND results.tool_call_id = calls.tool_call_id
+					AND results.result_number = 1
+				ORDER BY call_record.timestamp, calls.source_path,
+					calls.record_id, calls.block_index`,
+			)
+			.all() as unknown as RecoveryActivityRecord[];
+	}
+
+	/** Return effective user-message offsets that bound recovery inference. */
+	get_user_turn_boundaries(): UserTurnBoundary[] {
+		return this.db
+			.prepare(
+				`SELECT source_path, session_id, id AS record_id, source_byte_offset
+				FROM effective_session_records
+				WHERE record_type = 'message' AND message_role = 'user'
+				ORDER BY source_path, source_byte_offset, id`,
+			)
+			.all() as unknown as UserTurnBoundary[];
+	}
+
+	/** Return recorded assistant usage from effective canonical history. */
+	get_usage_activity(
+		filters: ToolActivityFilters = {},
+	): UsageActivityRecord[] {
+		const conditions = [
+			"records.record_type = 'message'",
+			"records.message_role = 'assistant'",
+			'records.usage_json IS NOT NULL',
+		];
+		const params: Array<string | number> = [];
+		if (filters.project) {
+			conditions.push("COALESCE(projects.project_path, '') LIKE ?");
+			params.push(`%${filters.project}%`);
+		}
+		if (filters.session) {
+			conditions.push('records.session_id LIKE ?');
+			params.push(`${filters.session}%`);
+		}
+		if (filters.provider) {
+			conditions.push('records.provider = ?');
+			params.push(filters.provider);
+		}
+		if (filters.model) {
+			conditions.push('records.model = ?');
+			params.push(filters.model);
+		}
+		if (filters.after !== undefined) {
+			conditions.push('records.timestamp >= ?');
+			params.push(filters.after);
+		}
+		if (filters.before !== undefined) {
+			conditions.push('records.timestamp < ?');
+			params.push(filters.before);
+		}
+		return this.db
+			.prepare(
+				`WITH source_projects AS (
+					SELECT source_path,
+						MAX(CASE WHEN record_type = 'session' THEN cwd END) AS project_path
+					FROM effective_session_records
+					GROUP BY source_path
+				)
+				SELECT records.id AS record_id, records.session_id,
+					COALESCE(projects.project_path, '') AS project_path,
+					records.source_path, records.archive_generation_id,
+					records.timestamp, records.source_byte_offset,
+					records.source_byte_length, records.provider, records.model,
+					records.input_tokens, records.output_tokens,
+					records.cache_read_tokens, records.cache_write_tokens,
+					records.total_tokens,
+					CASE WHEN json_type(records.usage_json, '$.cost') IS NULL
+						THEN 0 ELSE 1 END AS cost_recorded,
+					records.cost_input, records.cost_output,
+					records.cost_cache_read, records.cost_cache_write,
+					records.cost_total
+				FROM effective_session_records records
+				LEFT JOIN source_projects projects
+					ON projects.source_path = records.source_path
+				WHERE ${conditions.join(' AND ')}
+				ORDER BY records.timestamp, records.source_path,
+					records.source_byte_offset, records.id`,
+			)
+			.all(...params) as unknown as UsageActivityRecord[];
 	}
 
 	get_tool_stats(
