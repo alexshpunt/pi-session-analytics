@@ -52,7 +52,10 @@ export const sync = defineCommand({
 
 		try {
 			if (!args.json) console.log('Syncing sessions...');
-			const result = await sync_sessions(db, args.verbose);
+			const result = await sync_sessions(
+				db,
+				Boolean(args.verbose && !args.json),
+			);
 
 			if (args.json) {
 				console.log(JSON.stringify(result));
@@ -61,10 +64,14 @@ export const sync = defineCommand({
 
 			console.log(`
 Done!
-  Files scanned:      ${result.files_scanned}
+  JSONL candidates:   ${result.discovery.candidates}
+  Sessions selected:  ${result.discovery.sessions}
+  Duplicate IDs:      ${result.discovery.excluded.duplicate_session_id}
+  Non-session files:  ${result.discovery.excluded.non_session}
+  Malformed JSON:     ${result.discovery.excluded.malformed_json}
   Files processed:    ${result.files_processed}
   Messages added:     ${result.messages_added}
-  Sessions found:     ${result.sessions_added}
+  Sessions added:     ${result.sessions_added}
   Tool calls:         ${result.tool_calls_added}
   Tool results:       ${result.tool_results_added}
   Model changes:      ${result.model_changes_added}

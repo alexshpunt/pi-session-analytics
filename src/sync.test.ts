@@ -3,10 +3,11 @@ import {
 	mkdtempSync,
 	rmSync,
 	statSync,
+	utimesSync,
 	writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { Database } from './db.ts';
 import { sync } from './sync.ts';
@@ -98,5 +99,92 @@ describe('session metadata backfill', () => {
 		expect(db.get_sync_state(file_path)?.metadata_indexed).toBe(1);
 		expect(db.get_stats().messages).toBe(1);
 		db.close();
+	});
+});
+
+describe('native session discovery', () => {
+	function write_session(file_path: string, id: string, cwd: string) {
+		mkdirSync(dirname(file_path), { recursive: true });
+		writeFileSync(
+			file_path,
+			`${JSON.stringify({
+				type: 'session',
+				version: 3,
+				id,
+				timestamp: '2026-09-03T00:00:00.000Z',
+				cwd,
+			})}\n`,
+		);
+	}
+
+	test('selects each header-valid session once and classifies other JSONL files', async () => {
+		const dir = mkdtempSync(
+			join(tmpdir(), 'pi-session-analytics-discovery-'),
+		);
+		dirs.push(dir);
+		const direct = join(dir, '--tmp-direct--', 'direct.jsonl');
+		const nested = join(
+			dir,
+			'--tmp-nested--',
+			'subagents',
+			'nested.jsonl',
+		);
+		const duplicate = join(
+			dir,
+			'--tmp-direct--',
+			'restored',
+			'duplicate.jsonl',
+		);
+		const activity = join(
+			dir,
+			'--tmp-direct--',
+			'artifacts',
+			'child.settled.jsonl',
+		);
+		const malformed = join(
+			dir,
+			'--tmp-direct--',
+			'artifacts',
+			'malformed.jsonl',
+		);
+		write_session(direct, 'session-direct', '/tmp/direct');
+		write_session(nested, 'session-nested', '/tmp/nested');
+		write_session(duplicate, 'session-direct', '/tmp/direct');
+		const now = Date.now() / 1000;
+		utimesSync(direct, now - 10, now - 10);
+		utimesSync(duplicate, now, now);
+		mkdirSync(dirname(activity), { recursive: true });
+		writeFileSync(
+			activity,
+			`${JSON.stringify({ schema: 1, childId: 'child', outcome: 'clean' })}\n`,
+		);
+		writeFileSync(malformed, '{not json}\n');
+
+		const db = new Database(join(dir, 'discovery.db'));
+		try {
+			const first = await sync(db, false, dir);
+			expect(first.discovery).toEqual({
+				candidates: 5,
+				sessions: 2,
+				excluded: {
+					duplicate_session_id: 1,
+					malformed_json: 1,
+					non_session: 1,
+				},
+			});
+			expect(first.sessions_added).toBe(2);
+			expect(db.get_stats().sessions).toBe(2);
+			const direct_session = db
+				.list_resumable_sessions()
+				.find((session) => session.id === 'session-direct');
+			expect(direct_session?.path).toBe(duplicate);
+
+			const second = await sync(db, false, dir);
+			expect(second.discovery).toEqual(first.discovery);
+			expect(second.sessions_added).toBe(0);
+			expect(db.get_stats().sessions).toBe(2);
+		} finally {
+			db.close();
+		}
 	});
 });

@@ -19,6 +19,18 @@ const SESSIONS_DIR = join(
 	'sessions',
 );
 
+/** Counts produced while classifying JSONL files as native Pi sessions. */
+export interface SessionDiscoveryStats {
+	candidates: number;
+	sessions: number;
+	excluded: {
+		duplicate_session_id: number;
+		malformed_json: number;
+		non_session: number;
+	};
+}
+
+/** Result returned by one incremental session sync. */
 export interface SyncResult {
 	files_scanned: number;
 	files_processed: number;
@@ -27,8 +39,10 @@ export interface SyncResult {
 	tool_calls_added: number;
 	tool_results_added: number;
 	model_changes_added: number;
+	discovery: SessionDiscoveryStats;
 }
 
+/** Discover and incrementally import each native Pi session under a sessions root. */
 export async function sync(
 	db: Database,
 	verbose = false,
@@ -42,20 +56,34 @@ export async function sync(
 		tool_calls_added: 0,
 		tool_results_added: 0,
 		model_changes_added: 0,
+
+		discovery: {
+			candidates: 0,
+			sessions: 0,
+			excluded: {
+				duplicate_session_id: 0,
+				malformed_json: 0,
+				non_session: 0,
+			},
+		},
 	};
 
 	if (!existsSync(sessions_dir)) {
-		console.log(`Sessions directory not found: ${sessions_dir}`);
+		if (verbose) {
+			console.log(`Sessions directory not found: ${sessions_dir}`);
+		}
 		return result;
 	}
 
-	const files = await glob('**/*.jsonl', {
-		cwd: sessions_dir,
-		absolute: true,
-	});
-
-	result.files_scanned = files.length;
-	console.log(`Found ${files.length} session files`);
+	const discovered = await discover_sessions(sessions_dir);
+	const files = discovered.sessions;
+	result.files_scanned = discovered.stats.candidates;
+	result.discovery = discovered.stats;
+	if (verbose) {
+		console.log(
+			`Discovered ${discovered.stats.sessions} sessions from ${discovered.stats.candidates} JSONL candidates`,
+		);
+	}
 
 	const seen_sessions = new Set<string>();
 	const seen_at = Date.now();
@@ -64,9 +92,9 @@ export async function sync(
 	db.disable_foreign_keys();
 	db.begin();
 
-	for (const file_path of files) {
+	for (const { file_path, header } of files) {
 		file_idx++;
-		if (file_idx % 100 === 0) {
+		if (verbose && file_idx % 100 === 0) {
 			process.stdout.write(
 				`\r  Progress: ${file_idx}/${files.length}`,
 			);
@@ -84,22 +112,19 @@ export async function sync(
 		);
 
 		if (sync_state && sync_state.last_modified >= last_modified) {
-			const header = read_session_header(file_path);
-			if (header) {
-				db.update_session_source({
-					id: header.id,
-					path: file_path,
-					mtime_ms: last_modified,
-					size_bytes: file_stats.size,
-					last_seen_at: seen_at,
-					name: backfilled_metadata?.name,
-					name_seen: backfilled_metadata?.name_seen,
-					parent_session_path:
-						backfilled_metadata?.parent_session_path ??
-						header.parentSession,
-					first_message: backfilled_metadata?.first_message,
-				});
-			}
+			db.update_session_source({
+				id: header.id,
+				path: file_path,
+				mtime_ms: last_modified,
+				size_bytes: file_stats.size,
+				last_seen_at: seen_at,
+				name: backfilled_metadata?.name,
+				name_seen: backfilled_metadata?.name_seen,
+				parent_session_path:
+					backfilled_metadata?.parent_session_path ??
+					header.parentSession,
+				first_message: backfilled_metadata?.first_message,
+			});
 			db.set_sync_state(
 				file_path,
 				last_modified,
@@ -121,13 +146,12 @@ export async function sync(
 
 		let last_byte_offset = start_offset;
 		let file_messages_added = 0;
-		const header = read_session_header(file_path);
-		let session_id = header?.id ?? '';
+		let session_id = header.id;
 		let session_name = backfilled_metadata?.name;
 		let session_name_seen = backfilled_metadata?.name_seen ?? false;
 		let parent_session_path =
 			backfilled_metadata?.parent_session_path ??
-			header?.parentSession;
+			header.parentSession;
 		let first_message = backfilled_metadata?.first_message;
 
 		for (const { result: parsed, byte_offset } of parse_file(
@@ -248,7 +272,7 @@ export async function sync(
 	db.commit();
 	db.enable_foreign_keys();
 
-	if (files.length >= 100) {
+	if (verbose && files.length >= 100) {
 		console.log(); // newline after progress
 	}
 
@@ -331,28 +355,136 @@ async function read_session_metadata(
 		: null;
 }
 
-function read_session_header(file_path: string): {
+interface SessionHeader {
+	type: 'session';
+	version: number;
 	id: string;
+	timestamp: string;
+	cwd: string;
 	parentSession?: string;
-} | null {
+}
+
+interface DiscoveredSession {
+	file_path: string;
+	header: SessionHeader;
+	mtime_ms: number;
+	size_bytes: number;
+}
+
+type HeaderInspection =
+	| { kind: 'session'; header: SessionHeader }
+	| { kind: 'malformed_json' }
+	| { kind: 'non_session' };
+
+async function discover_sessions(sessions_dir: string): Promise<{
+	sessions: DiscoveredSession[];
+	stats: SessionDiscoveryStats;
+}> {
+	const candidates = (
+		await glob('**/*.jsonl', {
+			cwd: sessions_dir,
+			absolute: true,
+		})
+	).sort();
+	const selected = new Map<string, DiscoveredSession>();
+	const stats: SessionDiscoveryStats = {
+		candidates: candidates.length,
+		sessions: 0,
+		excluded: {
+			duplicate_session_id: 0,
+			malformed_json: 0,
+			non_session: 0,
+		},
+	};
+
+	for (const file_path of candidates) {
+		const inspected = inspect_session_header(file_path);
+		if (inspected.kind !== 'session') {
+			stats.excluded[inspected.kind]++;
+			continue;
+		}
+		const file_stats = statSync(file_path);
+		const candidate: DiscoveredSession = {
+			file_path,
+			header: inspected.header,
+			mtime_ms: file_stats.mtimeMs,
+			size_bytes: file_stats.size,
+		};
+		const previous = selected.get(inspected.header.id);
+		if (!previous) {
+			selected.set(inspected.header.id, candidate);
+			continue;
+		}
+		stats.excluded.duplicate_session_id++;
+		if (prefer_session_source(candidate, previous)) {
+			selected.set(inspected.header.id, candidate);
+		}
+	}
+
+	const sessions = [...selected.values()].sort((left, right) =>
+		left.file_path.localeCompare(right.file_path),
+	);
+	stats.sessions = sessions.length;
+	return { sessions, stats };
+}
+
+function prefer_session_source(
+	candidate: DiscoveredSession,
+	current: DiscoveredSession,
+): boolean {
+	if (candidate.mtime_ms !== current.mtime_ms) {
+		return candidate.mtime_ms > current.mtime_ms;
+	}
+	if (candidate.size_bytes !== current.size_bytes) {
+		return candidate.size_bytes > current.size_bytes;
+	}
+	return candidate.file_path.localeCompare(current.file_path) < 0;
+}
+
+function inspect_session_header(file_path: string): HeaderInspection {
 	let fd: number | undefined;
 	try {
 		fd = openSync(file_path, 'r');
 		const buffer = Buffer.allocUnsafe(64 * 1024);
 		const bytes_read = readSync(fd, buffer, 0, buffer.length, 0);
 		const newline = buffer.subarray(0, bytes_read).indexOf(10);
-		if (newline < 0) return null;
-		const first_line = buffer.subarray(0, newline).toString('utf8');
-		const header = JSON.parse(first_line) as {
-			type?: string;
-			id?: string;
-			parentSession?: string;
-		};
-		return header.type === 'session' && typeof header.id === 'string'
-			? { id: header.id, parentSession: header.parentSession }
-			: null;
+		const line_end =
+			newline >= 0
+				? newline
+				: bytes_read < buffer.length
+					? bytes_read
+					: -1;
+		if (line_end <= 0) return { kind: 'malformed_json' };
+		let value: unknown;
+		try {
+			value = JSON.parse(
+				buffer.subarray(0, line_end).toString('utf8'),
+			) as unknown;
+		} catch {
+			return { kind: 'malformed_json' };
+		}
+		if (!value || typeof value !== 'object') {
+			return { kind: 'non_session' };
+		}
+		const header = value as Partial<SessionHeader>;
+		if (
+			header.type !== 'session' ||
+			typeof header.version !== 'number' ||
+			!Number.isInteger(header.version) ||
+			typeof header.id !== 'string' ||
+			!header.id ||
+			typeof header.timestamp !== 'string' ||
+			!Number.isFinite(Date.parse(header.timestamp)) ||
+			typeof header.cwd !== 'string' ||
+			!header.cwd ||
+			(header.parentSession !== undefined &&
+				typeof header.parentSession !== 'string')
+		) {
+			return { kind: 'non_session' };
+		}
+		return { kind: 'session', header: header as SessionHeader };
 	} catch {
-		return null;
+		return { kind: 'malformed_json' };
 	} finally {
 		if (fd !== undefined) closeSync(fd);
 	}
