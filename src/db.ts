@@ -88,6 +88,35 @@ export interface ArchiveGenerationChunkRecord {
 	size_bytes: number;
 }
 
+/** One content-addressed archive chunk. */
+export interface ArchiveChunkRecord {
+	hash: string;
+	size_bytes: number;
+}
+
+/** Database invariants and counts used by archive verification. */
+export interface VerificationSnapshot {
+	integrity_messages: string[];
+	foreign_key_violations: number;
+	foreign_keys_enabled: number;
+	archive_sources: number;
+	archive_generations: number;
+	archive_chunks: number;
+	generation_chunk_links: number;
+	session_records: number;
+	effective_records: number;
+	fts_records: number;
+	unindexed_generations: number;
+	record_index_mismatches: number;
+	canonical_provenance_mismatches: number;
+	current_generation_mismatches: number;
+
+	report_provenance_mismatches: number;
+	effective_tool_calls: number;
+	effective_tool_results: number;
+	effective_usage_records: number;
+}
+
 /** Lossless common and typed fields for one archived JSONL record. */
 export interface SessionRecordInsert {
 	archive_generation_id: number;
@@ -318,6 +347,11 @@ export class Database {
 		this.db.exec('COMMIT');
 	}
 
+	/** Roll back the active transaction. */
+	rollback() {
+		this.db.exec('ROLLBACK');
+	}
+
 	disable_foreign_keys() {
 		this.db.exec('PRAGMA foreign_keys = OFF');
 	}
@@ -520,6 +554,139 @@ export class Database {
 			.all(
 				generation_id,
 			) as unknown as ArchiveGenerationChunkRecord[];
+	}
+
+	/** Return every tracked archive source in stable path order. */
+	list_archive_sources(): ArchiveSourceRecord[] {
+		return this.db
+			.prepare('SELECT * FROM archive_sources ORDER BY source_path')
+			.all() as unknown as ArchiveSourceRecord[];
+	}
+
+	/** Return every immutable archive generation in stable ID order. */
+	list_all_archive_generations(): ArchiveGenerationRecord[] {
+		return this.db
+			.prepare('SELECT * FROM archive_generations ORDER BY id')
+			.all() as unknown as ArchiveGenerationRecord[];
+	}
+
+	/** Return every content-addressed archive chunk in stable hash order. */
+	list_archive_chunks(): ArchiveChunkRecord[] {
+		return this.db
+			.prepare(
+				'SELECT hash, size_bytes FROM archive_chunks ORDER BY hash',
+			)
+			.all() as unknown as ArchiveChunkRecord[];
+	}
+
+	/** Return aggregate database counts and integrity mismatches. */
+	get_verification_snapshot(): VerificationSnapshot {
+		const count = (sql: string): number =>
+			(this.db.prepare(sql).get() as { count: number }).count;
+		const integrity_messages = (
+			this.db.prepare('PRAGMA integrity_check').all() as Array<{
+				integrity_check: string;
+			}>
+		).map((row) => row.integrity_check);
+		return {
+			integrity_messages,
+			foreign_key_violations: this.db
+				.prepare('PRAGMA foreign_key_check')
+				.all().length,
+			foreign_keys_enabled: (
+				this.db.prepare('PRAGMA foreign_keys').get() as {
+					foreign_keys: number;
+				}
+			).foreign_keys,
+			archive_sources: count(
+				'SELECT COUNT(*) AS count FROM archive_sources',
+			),
+			archive_generations: count(
+				'SELECT COUNT(*) AS count FROM archive_generations',
+			),
+			archive_chunks: count(
+				'SELECT COUNT(*) AS count FROM archive_chunks',
+			),
+			generation_chunk_links: count(
+				'SELECT COUNT(*) AS count FROM archive_generation_chunks',
+			),
+			session_records: count(
+				'SELECT COUNT(*) AS count FROM session_records',
+			),
+			effective_records: count(
+				'SELECT COUNT(*) AS count FROM effective_session_records',
+			),
+			fts_records: count(
+				'SELECT COUNT(*) AS count FROM session_records_fts',
+			),
+			unindexed_generations: count(
+				`SELECT COUNT(*) AS count
+				FROM archive_generations generations
+				LEFT JOIN record_index_state state
+					ON state.archive_generation_id = generations.id
+				WHERE state.archive_generation_id IS NULL`,
+			),
+			record_index_mismatches: count(
+				`SELECT COUNT(*) AS count FROM record_index_state state
+				WHERE state.records_count != (
+					SELECT COUNT(*) FROM session_records records
+					WHERE records.archive_generation_id = state.archive_generation_id
+				) OR state.invalid_count != (
+					SELECT COUNT(*) FROM session_records records
+					WHERE records.archive_generation_id = state.archive_generation_id
+						AND records.parse_error IS NOT NULL
+				)`,
+			),
+			canonical_provenance_mismatches: count(
+				`SELECT COUNT(*) AS count FROM session_records records
+				LEFT JOIN archive_generations generations
+					ON generations.id = records.archive_generation_id
+				WHERE generations.id IS NULL
+					OR records.source_path != generations.source_path
+					OR records.session_id != generations.session_id
+					OR records.source_byte_offset < 0
+					OR records.source_byte_length <= 0
+					OR records.source_byte_offset + records.source_byte_length > generations.size_bytes
+					OR length(CAST(records.raw_json AS BLOB)) != records.source_byte_length`,
+			),
+			current_generation_mismatches: count(
+				`SELECT COUNT(*) AS count FROM archive_sources sources
+				LEFT JOIN archive_generations generations
+					ON generations.id = sources.current_generation_id
+				WHERE sources.current_generation_id IS NULL
+					OR generations.source_path IS NULL
+					OR generations.source_path != sources.source_path
+					OR generations.session_id != sources.session_id`,
+			),
+			report_provenance_mismatches: count(
+				`SELECT COUNT(*) AS count FROM (
+					SELECT calls.record_id FROM record_tool_calls calls
+					LEFT JOIN session_records records ON records.id = calls.record_id
+					WHERE records.id IS NULL
+						OR records.source_path != calls.source_path
+						OR records.session_id != calls.session_id
+					UNION ALL
+					SELECT results.record_id FROM record_tool_results results
+					LEFT JOIN session_records records ON records.id = results.record_id
+					WHERE records.id IS NULL
+						OR records.source_path != results.source_path
+						OR records.session_id != results.session_id
+				)`,
+			),
+			effective_tool_calls: count(
+				`SELECT COUNT(*) AS count FROM record_tool_calls calls
+				JOIN effective_session_records records ON records.id = calls.record_id`,
+			),
+			effective_tool_results: count(
+				`SELECT COUNT(*) AS count FROM record_tool_results results
+				JOIN effective_session_records records ON records.id = results.record_id`,
+			),
+			effective_usage_records: count(
+				`SELECT COUNT(*) AS count FROM effective_session_records
+				WHERE record_type = 'message' AND message_role = 'assistant'
+					AND usage_json IS NOT NULL`,
+			),
+		};
 	}
 
 	/** Mark an archive source as observed and update its current file metadata. */
@@ -1441,11 +1608,14 @@ export class Database {
 			.all(...params);
 	}
 
-	/** Return effective canonical tool calls and their recorded outcomes. */
+	/** Stream effective canonical tool calls with only the payload needed by a report. */
 	get_tool_activity(
 		filters: ToolActivityFilters = {},
-	): ToolActivityRecord[] {
+		report: 'summary' | 'failures' | 'arguments' = 'summary',
+	): Iterable<ToolActivityRecord> {
 		const conditions: string[] = [];
+		if (report === 'failures')
+			conditions.push('results.is_error = 1');
 		const params: Array<string | number> = [];
 		if (filters.project) {
 			conditions.push("COALESCE(projects.project_path, '') LIKE ?");
@@ -1483,7 +1653,13 @@ export class Database {
 					FROM effective_session_records
 					GROUP BY source_path
 				), effective_results AS (
-					SELECT results.*, result_record.archive_generation_id,
+					SELECT results.record_id, results.source_path,
+						results.session_id, results.tool_call_id,
+						results.is_error,
+						${report === 'failures' ? 'results.content_text' : 'NULL'} AS content_text,
+						${report === 'failures' ? 'results.content_json' : 'NULL'} AS content_json,
+						${report === 'failures' ? 'results.details_json' : 'NULL'} AS details_json,
+						result_record.archive_generation_id,
 						result_record.timestamp, result_record.source_byte_offset,
 						result_record.source_byte_length,
 						ROW_NUMBER() OVER (
@@ -1500,15 +1676,16 @@ export class Database {
 					COALESCE(projects.project_path, '') AS project_path,
 					calls.source_path,
 					call_record.archive_generation_id,
-					calls.tool_call_id, calls.tool_name, calls.arguments_json,
+					calls.tool_call_id, calls.tool_name,
+					${report === 'arguments' ? 'calls.arguments_json' : "'{}'"} AS arguments_json,
 					call_record.provider, call_record.model, call_record.timestamp,
 					call_record.source_byte_offset, call_record.source_byte_length,
 					results.archive_generation_id AS result_archive_generation_id,
 					results.timestamp AS result_timestamp,
 					results.source_byte_offset AS result_source_byte_offset,
 					results.source_byte_length AS result_source_byte_length,
-					COALESCE(results.content_text, results.content_json) AS result_content,
-					results.details_json AS result_details_json,
+					${report === 'failures' ? 'COALESCE(results.content_text, results.content_json)' : 'NULL'} AS result_content,
+					${report === 'failures' ? 'results.details_json' : 'NULL'} AS result_details_json,
 					results.is_error
 				FROM record_tool_calls calls
 				JOIN effective_session_records call_record
@@ -1523,7 +1700,7 @@ export class Database {
 				${where}
 				ORDER BY call_record.timestamp, calls.source_path, calls.record_id, calls.block_index`,
 			)
-			.all(...params) as unknown as ToolActivityRecord[];
+			.iterate(...params) as unknown as Iterable<ToolActivityRecord>;
 	}
 
 	/** Return the effective tool timeline without loading argument or result payloads. */

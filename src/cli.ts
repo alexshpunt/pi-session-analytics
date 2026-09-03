@@ -43,6 +43,10 @@ export const sync = defineCommand({
 	},
 	args: {
 		...shared_args,
+		sessions: {
+			type: 'string',
+			description: 'Sessions root (default: ~/.pi/agent/sessions)',
+		},
 		verbose: {
 			type: 'boolean',
 			alias: 'v',
@@ -66,7 +70,7 @@ export const sync = defineCommand({
 			const result = await sync_sessions(
 				db,
 				Boolean(args.verbose && !args.json),
-				undefined,
+				args.sessions,
 				args.archive ?? DEFAULT_ARCHIVE_PATH,
 			);
 
@@ -366,7 +370,10 @@ export const tools = defineCommand({
 		};
 		const db = new Database(args.db ?? DEFAULT_DB_PATH);
 		try {
-			const activity = db.get_tool_activity(filters);
+			const activity = db.get_tool_activity(
+				filters,
+				report as 'summary' | 'failures' | 'arguments',
+			);
 			if (report === 'summary') {
 				const all_results = summarize_tools(activity);
 				const results = all_results.slice(0, limit);
@@ -1264,6 +1271,61 @@ ${result.dry_run ? '[DRY RUN] ' : ''}Compact results (cutoff: ${result.cutoff_da
 	},
 });
 
+export const verify = defineCommand({
+	meta: {
+		name: 'verify',
+		description: 'Verify database and immutable archive integrity',
+	},
+	args: {
+		...shared_args,
+		archive: {
+			type: 'string',
+			description: `Archive path (default: ${DEFAULT_ARCHIVE_PATH})`,
+		},
+		deep: {
+			type: 'boolean',
+			description: 'Hash every chunk, generation, and present source',
+		},
+	},
+	async run({ args }) {
+		const { existsSync } = await import('node:fs');
+		const { Database } = await import('./db.ts');
+		const { verify_archive } = await import('./verification.ts');
+		const db_path = args.db ?? DEFAULT_DB_PATH;
+		if (!existsSync(db_path))
+			throw new Error(`Database not found: ${db_path}`);
+		const db = new Database(db_path);
+		try {
+			const result = await verify_archive(
+				db,
+				args.archive ?? DEFAULT_ARCHIVE_PATH,
+				{
+					deep: Boolean(args.deep),
+					on_progress: args.json
+						? undefined
+						: (message) => console.log(message),
+				},
+			);
+			if (args.json) console.log(JSON.stringify(result, null, 2));
+			else {
+				for (const check of result.checks) {
+					console.log(
+						`${check.passed ? 'PASS' : 'FAIL'}  ${check.name}  (${check.checked})`,
+					);
+					for (const failure of check.failures)
+						console.log(`  ${failure}`);
+				}
+				console.log(
+					`\n${result.passed ? 'Verification passed' : 'Verification failed'} in ${result.elapsed_ms} ms`,
+				);
+			}
+			if (!result.passed) process.exitCode = 1;
+		} finally {
+			db.close();
+		}
+	},
+});
+
 export const schema = defineCommand({
 	meta: {
 		name: 'schema',
@@ -1409,6 +1471,7 @@ export const main = defineCommand({
 		usage,
 		recall,
 		resumable,
+		verify,
 		schema,
 		compact,
 	},

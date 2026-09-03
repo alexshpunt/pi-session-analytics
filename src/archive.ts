@@ -176,6 +176,62 @@ export class SessionArchive {
 		}
 	}
 
+	/** Verify one content-addressed chunk against its recorded size and hash. */
+	verify_chunk(hash: string, size_bytes: number): void {
+		const path = this.chunk_path(hash);
+		if (
+			!existsSync(path) ||
+			statSync(path).size !== size_bytes ||
+			hash_file(path, size_bytes) !== hash
+		) {
+			throw new Error(`Archived chunk ${hash} failed verification`);
+		}
+	}
+
+	/** Verify the complete reconstructed bytes of one immutable generation. */
+	verify_generation(generation_id: number): void {
+		const generation = this.required_generation(generation_id);
+		const hash = createHash('sha256');
+		let size_bytes = 0;
+		for (const chunk of this.content_chunks(generation)) {
+			const bytes = readFileSync(this.chunk_path(chunk.chunk_hash));
+			if (
+				bytes.length !== chunk.size_bytes ||
+				createHash('sha256').update(bytes).digest('hex') !==
+					chunk.chunk_hash
+			) {
+				throw new Error(
+					`Archived chunk ${chunk.chunk_hash} failed verification`,
+				);
+			}
+			hash.update(bytes);
+			size_bytes += bytes.length;
+		}
+		if (
+			size_bytes !== generation.size_bytes ||
+			hash.digest('hex') !== generation.content_sha256
+		) {
+			throw new Error(
+				`Archived generation ${generation_id} failed verification`,
+			);
+		}
+	}
+
+	/** Verify a present source still matches its current archived generation. */
+	verify_source(file_path: string, generation_id: number): void {
+		const generation = this.required_generation(generation_id);
+		if (
+			!existsSync(file_path) ||
+			statSync(file_path).size !== generation.size_bytes ||
+			hash_file(file_path, generation.size_bytes) !==
+				generation.content_sha256
+		) {
+			throw new Error(
+				`Session source does not match generation ${generation_id}: ${file_path}`,
+			);
+		}
+	}
+
 	/** Restore one committed archive generation exactly to a destination file. */
 	restore_generation(
 		generation_id: number,

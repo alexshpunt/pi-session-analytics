@@ -108,6 +108,7 @@ npx pi-session-analytics sync                  # Import sessions (incremental)
 npx pi-session-analytics stats                 # Session/message/token/cost counts
 npx pi-session-analytics sessions              # List recent sessions
 npx pi-session-analytics resumable --json      # List live sessions for resume UIs
+npx pi-session-analytics verify --deep          # Verify database and archived bytes
 npx pi-session-analytics search <term>         # Full-text search across all archived records
 npx pi-session-analytics tools                 # Tool calls, failures, and argument shapes
 npx pi-session-analytics recoveries            # Inferred same-turn recovery sequences
@@ -183,6 +184,29 @@ unpriced messages separately; cost is `null` when no contributing
 message recorded one. Missing prices are not looked up or estimated,
 and event timestamps are not presented as exact active-session
 duration.
+
+## Sync checkpoints and verification
+
+Sync commits each selected session source with its archive generation,
+legacy compatibility rows, canonical records, and sync state. If the
+process stops, the next sync reuses every committed source and
+continues with the rest.
+
+For an isolated import, pass
+`sync --sessions <root> --archive <root> --db <file>`.
+
+```bash
+npx pi-session-analytics verify
+npx pi-session-analytics verify --deep
+npx pi-session-analytics verify --deep --json
+```
+
+The normal check covers SQLite integrity, foreign keys, current
+generation links, canonical indexing, FTS row counts, and report
+provenance. `--deep` also hashes every content-addressed chunk,
+reconstructs and hashes every generation, compares every source still
+present with its current generation, and rejects missing or untracked
+chunk files. A failed check sets a non-zero exit status.
 
 ## Schema migrations
 

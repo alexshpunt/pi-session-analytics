@@ -234,7 +234,7 @@ describe('canonical tool reports', () => {
 			);
 			await sync(db, false, sessions_dir, archive_dir);
 
-			const activity = db.get_tool_activity();
+			const activity = [...db.get_tool_activity()];
 			expect(activity).toHaveLength(5);
 			expect(summarize_tools(activity)).toEqual([
 				{
@@ -266,7 +266,9 @@ describe('canonical tool reports', () => {
 				},
 			]);
 
-			const failures = group_tool_failures(activity);
+			const failures = group_tool_failures(
+				db.get_tool_activity({}, 'failures'),
+			);
 			expect(failures).toHaveLength(1);
 			expect(failures[0]).toMatchObject({
 				tool_name: 'bash',
@@ -283,7 +285,9 @@ describe('canonical tool reports', () => {
 				failures[0]!.occurrences[0]!.source_byte_length,
 			).toBeGreaterThan(0);
 
-			const arguments_report = report_tool_arguments(activity);
+			const arguments_report = report_tool_arguments(
+				db.get_tool_activity({}, 'arguments'),
+			);
 			expect(arguments_report.keys).toContainEqual({
 				tool_name: 'bash',
 				key: 'options.force',
@@ -298,24 +302,24 @@ describe('canonical tool reports', () => {
 			expect(repeated_shape?.shape).not.toContain('secret');
 			expect(repeated_shape?.occurrences).toHaveLength(2);
 
-			expect(
-				db.get_tool_activity({ project: 'project/a' }),
-			).toHaveLength(4);
-			expect(
-				db.get_tool_activity({ session: 'session-b' }),
-			).toHaveLength(1);
-			expect(
-				db.get_tool_activity({ provider: 'anthropic' }),
-			).toHaveLength(1);
-			expect(db.get_tool_activity({ model: 'model-b' })).toHaveLength(
-				1,
-			);
-			expect(
-				db.get_tool_activity({
+			expect([
+				...db.get_tool_activity({ project: 'project/a' }),
+			]).toHaveLength(4);
+			expect([
+				...db.get_tool_activity({ session: 'session-b' }),
+			]).toHaveLength(1);
+			expect([
+				...db.get_tool_activity({ provider: 'anthropic' }),
+			]).toHaveLength(1);
+			expect([
+				...db.get_tool_activity({ model: 'model-b' }),
+			]).toHaveLength(1);
+			expect([
+				...db.get_tool_activity({
 					after: Date.parse('2026-09-01T00:00:05.000Z'),
 					before: Date.parse('2026-09-02T00:00:00.000Z'),
 				}),
-			).toHaveLength(2);
+			]).toHaveLength(2);
 		} finally {
 			db.close();
 		}

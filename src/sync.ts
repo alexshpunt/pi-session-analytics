@@ -61,6 +61,12 @@ export interface SyncResult {
 	records: RecordIndexStats;
 }
 
+/** Optional controls for interruptible, checkpointed sync execution. */
+export interface SyncControl {
+	signal?: AbortSignal;
+	on_checkpoint?: (committed_sources: number) => void;
+}
+
 /** Discover and incrementally import each native Pi session under a sessions root. */
 export async function sync(
 	db: Database,
@@ -69,6 +75,7 @@ export async function sync(
 	archive_dir = sessions_dir === SESSIONS_DIR
 		? DEFAULT_ARCHIVE_DIR
 		: join(sessions_dir, '.pi-session-analytics-archive'),
+	control: SyncControl = {},
 ): Promise<SyncResult> {
 	const result: SyncResult = {
 		files_scanned: 0,
@@ -108,14 +115,13 @@ export async function sync(
 		if (verbose) {
 			console.log(`Sessions directory not found: ${sessions_dir}`);
 		}
-		db.begin();
-		db.mark_all_archive_sources_missing();
-
-		result.records =
-			record_indexer.index_pending_generations(seen_at);
-		result.archive.sources_missing =
-			db.count_missing_archive_sources();
-		db.commit();
+		await in_transaction(db, () => {
+			db.mark_all_archive_sources_missing();
+			result.records =
+				record_indexer.index_pending_generations(seen_at);
+			result.archive.sources_missing =
+				db.count_missing_archive_sources();
+		});
 		return result;
 	}
 
@@ -133,207 +139,262 @@ export async function sync(
 	let file_idx = 0;
 
 	db.disable_foreign_keys();
-	db.begin();
-	db.mark_all_archive_sources_missing();
+	try {
+		await in_transaction(db, () => {
+			db.mark_all_archive_sources_missing();
+		});
 
-	for (const { file_path, header } of files) {
-		file_idx++;
-		if (verbose && file_idx % 100 === 0) {
-			process.stdout.write(
-				`\r  Progress: ${file_idx}/${files.length}`,
-			);
-		}
-		const file_stats = statSync(file_path);
-		const last_modified = file_stats.mtimeMs;
+		for (const { file_path, header } of files) {
+			throw_if_interrupted(control.signal);
+			await in_transaction(db, async () => {
+				file_idx++;
+				if (verbose && file_idx % 100 === 0) {
+					process.stdout.write(
+						`\r  Progress: ${file_idx}/${files.length}`,
+					);
+				}
+				const file_stats = statSync(file_path);
+				const last_modified = file_stats.mtimeMs;
 
-		const archived = archive.archive_source(
-			file_path,
-			header.id,
-			seen_at,
-		);
-		if (archived.generation_added) result.archive.generations_added++;
-		result.archive.chunks_added += archived.chunks_added;
-		result.archive.bytes_added += archived.bytes_added;
+				const archived = archive.archive_source(
+					file_path,
+					header.id,
+					seen_at,
+				);
+				if (archived.generation_added)
+					result.archive.generations_added++;
+				result.archive.chunks_added += archived.chunks_added;
+				result.archive.bytes_added += archived.bytes_added;
 
-		const sync_state = db.get_sync_state(file_path);
-		const backfilled_metadata =
-			sync_state && !sync_state.metadata_indexed
-				? await read_session_metadata(file_path)
-				: null;
-		const metadata_indexed = Boolean(
-			sync_state?.metadata_indexed || backfilled_metadata,
-		);
+				const sync_state = db.get_sync_state(file_path);
+				const backfilled_metadata =
+					sync_state && !sync_state.metadata_indexed
+						? await read_session_metadata(file_path)
+						: null;
+				const metadata_indexed = Boolean(
+					sync_state?.metadata_indexed || backfilled_metadata,
+				);
 
-		if (sync_state && sync_state.last_modified >= last_modified) {
-			db.update_session_source({
-				id: header.id,
-				path: file_path,
-				mtime_ms: last_modified,
-				size_bytes: file_stats.size,
-				last_seen_at: seen_at,
-				name: backfilled_metadata?.name,
-				name_seen: backfilled_metadata?.name_seen,
-				parent_session_path:
+				if (sync_state && sync_state.last_modified >= last_modified) {
+					db.update_session_source({
+						id: header.id,
+						path: file_path,
+						mtime_ms: last_modified,
+						size_bytes: file_stats.size,
+						last_seen_at: seen_at,
+						name: backfilled_metadata?.name,
+						name_seen: backfilled_metadata?.name_seen,
+						parent_session_path:
+							backfilled_metadata?.parent_session_path ??
+							header.parentSession,
+						first_message: backfilled_metadata?.first_message,
+					});
+					db.set_sync_state(
+						file_path,
+						last_modified,
+						sync_state.last_byte_offset,
+						metadata_indexed,
+					);
+					add_record_stats(
+						result.records,
+						record_indexer.index_pending_generations(seen_at),
+					);
+					return;
+				}
+
+				const start_offset = sync_state?.last_byte_offset ?? 0;
+				const project_path = extract_project_path(
+					file_path,
+					sessions_dir,
+				);
+
+				if (verbose) {
+					console.log(`Processing: ${file_path}`);
+				}
+
+				let last_byte_offset = start_offset;
+				let file_messages_added = 0;
+				let session_id = header.id;
+				let session_name = backfilled_metadata?.name;
+				let session_name_seen =
+					backfilled_metadata?.name_seen ?? false;
+				let parent_session_path =
 					backfilled_metadata?.parent_session_path ??
-					header.parentSession,
-				first_message: backfilled_metadata?.first_message,
+					header.parentSession;
+				let first_message = backfilled_metadata?.first_message;
+
+				for (const { result: parsed, byte_offset } of parse_file(
+					file_path,
+					start_offset,
+				)) {
+					last_byte_offset = byte_offset;
+
+					// Handle session header
+					if (parsed.session) {
+						const session = parsed.session;
+						// Prefer cwd from session header over decoded dir name
+						const real_path = session.cwd || project_path;
+						if (!seen_sessions.has(session.id)) {
+							db.upsert_session({
+								id: session.id,
+								project_path: real_path,
+								cwd: session.cwd,
+								timestamp: session.timestamp,
+							});
+							seen_sessions.add(session.id);
+							result.sessions_added++;
+						}
+						session_id = session.id;
+						parent_session_path = session.parent_session_path;
+					}
+
+					if (parsed.session_info) {
+						session_name_seen = true;
+						session_name = parsed.session_info.name;
+					}
+
+					// Handle model changes
+					if (parsed.model_change) {
+						db.insert_model_change(parsed.model_change);
+						result.model_changes_added++;
+					}
+
+					// Handle messages
+					if (parsed.message) {
+						const msg = parsed.message;
+						if (
+							!first_message &&
+							msg.type === 'user' &&
+							msg.content_text
+						) {
+							first_message = msg.content_text;
+						}
+
+						// Ensure session exists (for resume where header was already processed)
+						if (
+							msg.session_id &&
+							!seen_sessions.has(msg.session_id)
+						) {
+							db.upsert_session({
+								id: msg.session_id,
+								project_path,
+								timestamp: msg.timestamp,
+							});
+							seen_sessions.add(msg.session_id);
+						}
+
+						db.insert_message(msg);
+						file_messages_added++;
+
+						// Insert tool calls
+						for (const tool_call of msg.tool_calls) {
+							db.insert_tool_call({
+								id: tool_call.id,
+								message_id: msg.id,
+								session_id: msg.session_id,
+								tool_name: tool_call.tool_name,
+								tool_input: tool_call.tool_input,
+								timestamp: msg.timestamp,
+							});
+							result.tool_calls_added++;
+						}
+
+						// Insert tool results
+						for (const tool_result of msg.tool_results) {
+							db.insert_tool_result({
+								tool_call_id: tool_result.tool_call_id,
+								message_id: msg.id,
+								session_id: msg.session_id,
+								content: tool_result.content,
+								is_error: tool_result.is_error,
+								timestamp: msg.timestamp,
+							});
+							result.tool_results_added++;
+						}
+					}
+				}
+
+				if (file_messages_added > 0) {
+					result.files_processed++;
+					result.messages_added += file_messages_added;
+				}
+
+				if (session_id) {
+					db.update_session_source({
+						id: session_id,
+						path: file_path,
+						mtime_ms: last_modified,
+						size_bytes: file_stats.size,
+						last_seen_at: seen_at,
+						name: session_name,
+						name_seen: session_name_seen,
+						parent_session_path,
+						first_message,
+					});
+				}
+				db.set_sync_state(
+					file_path,
+					last_modified,
+					last_byte_offset,
+					metadata_indexed || start_offset === 0,
+				);
+				add_record_stats(
+					result.records,
+					record_indexer.index_pending_generations(seen_at),
+				);
 			});
-			db.set_sync_state(
-				file_path,
-				last_modified,
-				sync_state.last_byte_offset,
-				metadata_indexed,
+			control.on_checkpoint?.(file_idx);
+			throw_if_interrupted(control.signal);
+		}
+
+		await in_transaction(db, () => {
+			add_record_stats(
+				result.records,
+				record_indexer.index_pending_generations(seen_at),
 			);
-			continue;
-		}
-
-		const start_offset = sync_state?.last_byte_offset ?? 0;
-		const project_path = extract_project_path(
-			file_path,
-			sessions_dir,
-		);
-
-		if (verbose) {
-			console.log(`Processing: ${file_path}`);
-		}
-
-		let last_byte_offset = start_offset;
-		let file_messages_added = 0;
-		let session_id = header.id;
-		let session_name = backfilled_metadata?.name;
-		let session_name_seen = backfilled_metadata?.name_seen ?? false;
-		let parent_session_path =
-			backfilled_metadata?.parent_session_path ??
-			header.parentSession;
-		let first_message = backfilled_metadata?.first_message;
-
-		for (const { result: parsed, byte_offset } of parse_file(
-			file_path,
-			start_offset,
-		)) {
-			last_byte_offset = byte_offset;
-
-			// Handle session header
-			if (parsed.session) {
-				const session = parsed.session;
-				// Prefer cwd from session header over decoded dir name
-				const real_path = session.cwd || project_path;
-				if (!seen_sessions.has(session.id)) {
-					db.upsert_session({
-						id: session.id,
-						project_path: real_path,
-						cwd: session.cwd,
-						timestamp: session.timestamp,
-					});
-					seen_sessions.add(session.id);
-					result.sessions_added++;
-				}
-				session_id = session.id;
-				parent_session_path = session.parent_session_path;
-			}
-
-			if (parsed.session_info) {
-				session_name_seen = true;
-				session_name = parsed.session_info.name;
-			}
-
-			// Handle model changes
-			if (parsed.model_change) {
-				db.insert_model_change(parsed.model_change);
-				result.model_changes_added++;
-			}
-
-			// Handle messages
-			if (parsed.message) {
-				const msg = parsed.message;
-				if (
-					!first_message &&
-					msg.type === 'user' &&
-					msg.content_text
-				) {
-					first_message = msg.content_text;
-				}
-
-				// Ensure session exists (for resume where header was already processed)
-				if (msg.session_id && !seen_sessions.has(msg.session_id)) {
-					db.upsert_session({
-						id: msg.session_id,
-						project_path,
-						timestamp: msg.timestamp,
-					});
-					seen_sessions.add(msg.session_id);
-				}
-
-				db.insert_message(msg);
-				file_messages_added++;
-
-				// Insert tool calls
-				for (const tool_call of msg.tool_calls) {
-					db.insert_tool_call({
-						id: tool_call.id,
-						message_id: msg.id,
-						session_id: msg.session_id,
-						tool_name: tool_call.tool_name,
-						tool_input: tool_call.tool_input,
-						timestamp: msg.timestamp,
-					});
-					result.tool_calls_added++;
-				}
-
-				// Insert tool results
-				for (const tool_result of msg.tool_results) {
-					db.insert_tool_result({
-						tool_call_id: tool_result.tool_call_id,
-						message_id: msg.id,
-						session_id: msg.session_id,
-						content: tool_result.content,
-						is_error: tool_result.is_error,
-						timestamp: msg.timestamp,
-					});
-					result.tool_results_added++;
-				}
-			}
-		}
-
-		if (file_messages_added > 0) {
-			result.files_processed++;
-			result.messages_added += file_messages_added;
-		}
-
-		if (session_id) {
-			db.update_session_source({
-				id: session_id,
-				path: file_path,
-				mtime_ms: last_modified,
-				size_bytes: file_stats.size,
-				last_seen_at: seen_at,
-				name: session_name,
-				name_seen: session_name_seen,
-				parent_session_path,
-				first_message,
-			});
-		}
-		db.set_sync_state(
-			file_path,
-			last_modified,
-			last_byte_offset,
-			metadata_indexed || start_offset === 0,
-		);
+			db.mark_unseen_sources_missing(seen_at);
+			result.archive.sources_missing =
+				db.count_missing_archive_sources();
+		});
+	} finally {
+		db.enable_foreign_keys();
 	}
-
-	result.records = record_indexer.index_pending_generations(seen_at);
-
-	db.mark_unseen_sources_missing(seen_at);
-
-	result.archive.sources_missing = db.count_missing_archive_sources();
-	db.commit();
-	db.enable_foreign_keys();
 
 	if (verbose && files.length >= 100) {
 		console.log(); // newline after progress
 	}
 
 	return result;
+}
+
+async function in_transaction<T>(
+	db: Database,
+	action: () => T | Promise<T>,
+): Promise<T> {
+	db.begin();
+	try {
+		const result = await action();
+		db.commit();
+		return result;
+	} catch (error) {
+		db.rollback();
+		throw error;
+	}
+}
+
+function throw_if_interrupted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error
+		? signal.reason
+		: new Error('Session sync interrupted');
+}
+
+function add_record_stats(
+	total: RecordIndexStats,
+	added: RecordIndexStats,
+): void {
+	total.added += added.added;
+	total.invalid += added.invalid;
 }
 
 interface SessionMetadata {

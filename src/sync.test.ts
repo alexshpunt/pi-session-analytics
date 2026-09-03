@@ -102,6 +102,96 @@ describe('session metadata backfill', () => {
 	});
 });
 
+describe('checkpointed sync', () => {
+	test('keeps committed source progress after interruption and resumes cleanly', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'pi-session-checkpoint-'));
+		dirs.push(dir);
+		const sessions_dir = join(dir, 'sessions');
+		const archive_dir = join(dir, 'archive');
+		const sources = ['one', 'two'].map((name, index) => {
+			const path = join(
+				sessions_dir,
+				`--project-${name}--`,
+				`${name}.jsonl`,
+			);
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(
+				path,
+				[
+					{
+						type: 'session',
+						version: 3,
+						id: `session-${name}`,
+						timestamp: `2026-09-0${index + 1}T00:00:00.000Z`,
+						cwd: `/project/${name}`,
+					},
+					{
+						type: 'message',
+						id: `message-${name}`,
+						parentId: null,
+						timestamp: `2026-09-0${index + 1}T00:00:01.000Z`,
+						message: {
+							role: 'user',
+							content: [{ type: 'text', text: `checkpoint-${name}` }],
+						},
+					},
+				]
+					.map((entry) => `${JSON.stringify(entry)}\n`)
+					.join(''),
+			);
+			return path;
+		});
+		const db = new Database(join(dir, 'checkpoint.db'));
+		try {
+			await expect(
+				sync(db, false, sessions_dir, archive_dir, {
+					on_checkpoint(committed_sources) {
+						if (committed_sources === 1)
+							throw new Error('intentional interruption');
+					},
+				}),
+			).rejects.toThrow('intentional interruption');
+			expect(
+				sources.filter((source) => db.get_archive_source(source))
+					.length,
+			).toBe(1);
+
+			expect(db.search_records('checkpoint-one')).toHaveLength(1);
+			expect(db.search_records('checkpoint-two')).toHaveLength(0);
+			expect(
+				db.get_verification_snapshot().foreign_keys_enabled,
+			).toBe(1);
+			db.begin();
+			db.rollback();
+			const resumed = await sync(
+				db,
+				false,
+				sessions_dir,
+				archive_dir,
+			);
+			expect(resumed.archive.generations_added).toBe(1);
+			expect(resumed.records.added).toBe(2);
+			expect(db.search_records('checkpoint-one')).toHaveLength(1);
+			expect(db.search_records('checkpoint-two')).toHaveLength(1);
+
+			const unchanged = await sync(
+				db,
+				false,
+				sessions_dir,
+				archive_dir,
+			);
+			expect(unchanged.archive).toMatchObject({
+				generations_added: 0,
+				chunks_added: 0,
+				bytes_added: 0,
+			});
+			expect(unchanged.records).toEqual({ added: 0, invalid: 0 });
+		} finally {
+			db.close();
+		}
+	});
+});
+
 describe('native session discovery', () => {
 	function write_session(file_path: string, id: string, cwd: string) {
 		mkdirSync(dirname(file_path), { recursive: true });

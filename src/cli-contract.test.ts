@@ -7,9 +7,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { query, search } from './cli.ts';
+import { query, search, sync as sync_command } from './cli.ts';
 import { Database } from './db.ts';
-import { sync } from './sync.ts';
+import { sync as sync_sessions } from './sync.ts';
 
 const dirs: string[] = [];
 
@@ -67,7 +67,7 @@ describe('versioned CLI result contracts', () => {
 				.join(''),
 		);
 		const db = new Database(db_path);
-		await sync(
+		await sync_sessions(
 			db,
 			false,
 			join(dir, 'sessions'),
@@ -114,6 +114,41 @@ describe('versioned CLI result contracts', () => {
 			columns: ['record_type'],
 			count: 0,
 			rows: [],
+		});
+	});
+
+	test('sync accepts isolated sessions and archive roots', async () => {
+		const dir = mkdtempSync(
+			join(tmpdir(), 'pi-session-cli-sync-roots-'),
+		);
+		dirs.push(dir);
+		const sessions = join(dir, 'sessions');
+		const source = join(sessions, '--project--', 'one.jsonl');
+		const archive = join(dir, 'archive');
+		const db = join(dir, 'analytics.db');
+		mkdirSync(dirname(source), { recursive: true });
+		writeFileSync(
+			source,
+			`${JSON.stringify({
+				type: 'session',
+				version: 3,
+				id: 'isolated-session',
+				timestamp: '2026-09-03T00:00:00.000Z',
+				cwd: '/project',
+			})}\n`,
+		);
+
+		const result = await capture_json(sync_command, {
+			db,
+			archive,
+			sessions,
+			json: true,
+			verbose: false,
+		});
+		expect(result).toMatchObject({
+			files_scanned: 1,
+			discovery: { sessions: 1 },
+			archive: { generations_added: 1 },
 		});
 	});
 });

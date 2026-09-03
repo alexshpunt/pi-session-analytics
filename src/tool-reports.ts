@@ -51,7 +51,7 @@ export interface ToolArgumentShapeRow {
 
 /** Build per-tool call and recorded outcome totals. */
 export function summarize_tools(
-	activity: ToolActivityRecord[],
+	activity: Iterable<ToolActivityRecord>,
 ): ToolSummaryRow[] {
 	const rows = new Map<
 		string,
@@ -92,7 +92,7 @@ export function summarize_tools(
 
 /** Group recorded tool errors by stable normalized evidence. */
 export function group_tool_failures(
-	activity: ToolActivityRecord[],
+	activity: Iterable<ToolActivityRecord>,
 ): ToolFailureRow[] {
 	const groups = new Map<string, ToolFailureRow>();
 	for (const record of activity) {
@@ -129,7 +129,7 @@ export function group_tool_failures(
 
 /** Count argument paths and normalized JSON shapes without retaining values. */
 export function report_tool_arguments(
-	activity: ToolActivityRecord[],
+	activity: Iterable<ToolActivityRecord>,
 ): {
 	keys: ToolArgumentKeyRow[];
 	shapes: ToolArgumentShapeRow[];
