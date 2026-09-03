@@ -112,6 +112,7 @@ export class CanonicalRecordIndexer {
 				source_byte_length,
 				record_type: 'invalid',
 				raw_json,
+				search_text: raw_json,
 				parse_error:
 					error instanceof Error ? error.message : 'Invalid JSON',
 			});
@@ -127,6 +128,7 @@ export class CanonicalRecordIndexer {
 				source_byte_length,
 				record_type: 'invalid',
 				raw_json,
+				search_text: raw_json,
 				parse_error: 'Record is not a JSON object',
 			});
 			return false;
@@ -143,6 +145,7 @@ export class CanonicalRecordIndexer {
 				source_byte_length,
 				record_type: 'invalid',
 				raw_json,
+				search_text: raw_json,
 				parse_error: 'Record type is missing',
 			});
 			return false;
@@ -174,6 +177,7 @@ export class CanonicalRecordIndexer {
 			timestamp: timestamp_value(value.timestamp),
 			raw_json,
 			session_version: number_value(value.version),
+			search_text: searchable_text(value),
 			cwd: string_value(value.cwd),
 			parent_session_path: string_value(value.parentSession),
 			message_role: string_value(message?.role),
@@ -300,6 +304,37 @@ function content_text(content: unknown): string | undefined {
 		.filter((value): value is string => value !== undefined)
 		.join('\n');
 	return text || undefined;
+}
+
+function searchable_text(value: unknown): string {
+	const parts: string[] = [];
+	collect_search_values(value, parts);
+	return parts.join('\n');
+}
+
+function collect_search_values(
+	value: unknown,
+	parts: string[],
+): void {
+	if (typeof value === 'string') {
+		parts.push(value);
+		return;
+	}
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		parts.push(String(value));
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collect_search_values(item, parts);
+		return;
+	}
+	if (!is_object(value)) return;
+	const image = value.type === 'image';
+	for (const [key, child] of Object.entries(value)) {
+		if (image && key === 'data') continue;
+		parts.push(key);
+		collect_search_values(child, parts);
+	}
 }
 
 function usage_values(

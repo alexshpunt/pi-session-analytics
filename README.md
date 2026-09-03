@@ -108,10 +108,10 @@ npx pi-session-analytics sync                  # Import sessions (incremental)
 npx pi-session-analytics stats                 # Session/message/token/cost counts
 npx pi-session-analytics sessions              # List recent sessions
 npx pi-session-analytics resumable --json      # List live sessions for resume UIs
-npx pi-session-analytics search <term>         # Full-text search across messages
+npx pi-session-analytics search <term>         # Full-text search across all archived records
 npx pi-session-analytics tools                 # Most-used tools
 npx pi-session-analytics recall <term>         # LLM-optimised context retrieval
-npx pi-session-analytics query "<sql>"         # Raw SQL against the database
+npx pi-session-analytics query "<sql>"         # Read-only SQL against the database
 npx pi-session-analytics schema                # Show database table structure
 npx pi-session-analytics compact               # Prune old tool results
 ```
@@ -119,6 +119,13 @@ npx pi-session-analytics compact               # Prune old tool results
 All commands support `--json` for programmatic output and
 `-d, --db <path>` to use a custom database path (default:
 `~/.pi/pi-session-analytics.db`).
+
+`search --json` returns
+`{ schema_version, kind, query, count, results }`; every result
+includes the source path, archive generation, record type, and byte
+range. `query --json` returns
+`{ schema_version, kind, sql, columns, count, rows }`. Both envelopes
+use `schema_version: 1`, including empty results.
 
 ## Schema migrations
 

@@ -148,7 +148,7 @@ Database: ${db_path}
 export const query = defineCommand({
 	meta: {
 		name: 'query',
-		description: 'Execute raw SQL against the database',
+		description: 'Execute read-only SQL against the database',
 	},
 	args: {
 		...shared_args,
@@ -193,21 +193,36 @@ export const query = defineCommand({
 				sql = `${sql.replace(/;?\s*$/, '')} LIMIT ${parseInt(args.limit, 10)}`;
 			}
 
-			const rows = db.prepare(sql).all() as Record<string, unknown>[];
-
-			if (rows.length === 0) {
-				if (args.json) {
-					console.log('[]');
-				} else {
-					console.log('No results.');
-				}
-				return;
+			const statement = db.prepare(sql);
+			const declared_columns = statement
+				.columns()
+				.map((column) => column.name);
+			if (declared_columns.length === 0) {
+				throw new Error(
+					'Only read-only row-returning SQL is allowed',
+				);
 			}
-
-			const columns = Object.keys(rows[0]);
+			const rows = statement.all() as Record<string, unknown>[];
+			const columns =
+				rows.length > 0 ? Object.keys(rows[0]) : declared_columns;
 
 			if (format === 'json') {
-				console.log(JSON.stringify(rows, null, 2));
+				console.log(
+					JSON.stringify(
+						{
+							schema_version: 1,
+							kind: 'pi-session-analytics/query-results',
+							sql,
+							columns,
+							count: rows.length,
+							rows,
+						},
+						null,
+						2,
+					),
+				);
+			} else if (rows.length === 0) {
+				console.log('No results.');
 			} else if (format === 'csv') {
 				console.log(columns.join(','));
 				for (const row of rows) {
@@ -351,7 +366,8 @@ export const tools = defineCommand({
 export const search = defineCommand({
 	meta: {
 		name: 'search',
-		description: 'Full-text search across messages',
+		description:
+			'Full-text search across all archived session records',
 	},
 	args: {
 		...shared_args,
@@ -371,11 +387,15 @@ export const search = defineCommand({
 			alias: 'p',
 			description: 'Filter by project path',
 		},
+		type: {
+			type: 'string',
+			description: 'Filter by canonical record type',
+		},
 		context: {
 			type: 'string',
 			alias: 'c',
 			description:
-				'Show N messages before/after each match (default: 0)',
+				'Show N canonical records before/after each match (default: 0)',
 		},
 		rebuild: {
 			type: 'boolean',
@@ -400,170 +420,114 @@ export const search = defineCommand({
 	},
 	async run({ args }) {
 		const { Database } = await import('./db.ts');
-
 		const db_path = args.db ?? DEFAULT_DB_PATH;
 		const db = new Database(db_path);
-
 		try {
 			if (args.rebuild) {
-				if (!args.json) console.log('Rebuilding FTS index...');
-				db.rebuild_fts();
+				if (!args.json)
+					console.log('Rebuilding canonical FTS index...');
+				db.rebuild_record_fts();
 			}
-
 			const raw_term = args._ as string | string[];
 			const term = Array.isArray(raw_term)
 				? raw_term.join(' ')
 				: raw_term;
-			if (!term) {
-				if (args.json) {
-					console.log('[]');
-				} else {
-					console.log('No search term provided.');
-				}
-				return;
-			}
-
-			const sort_val = args.sort as
+			const limit = args.limit ? parseInt(args.limit, 10) : 20;
+			const sort = args.sort as
 				| 'relevance'
 				| 'time'
 				| 'time-asc'
 				| undefined;
-			const after_ms = args.after
+			const after = args.after
 				? new Date(args.after as string).getTime()
 				: undefined;
-			const results = db.search(term, {
-				limit: args.limit ? parseInt(args.limit, 10) : undefined,
-				project: args.project,
-				session: args.session as string | undefined,
-				after: after_ms,
-				sort: sort_val,
-			});
-
-			if (results.length === 0) {
-				if (args.json) {
-					console.log('[]');
-				} else {
-					console.log('No matches found.');
-				}
-				return;
-			}
-
 			const context_count = args.context
 				? parseInt(args.context, 10)
 				: 0;
-
+			const results = term
+				? db.search_records(term, {
+						limit,
+						project: args.project,
+						session: args.session as string | undefined,
+						record_type: args.type,
+						after,
+						sort,
+					})
+				: [];
+			const json_results = results.map((result) => {
+				const context =
+					context_count > 0
+						? db.get_record_context(result.record_id, context_count)
+						: undefined;
+				return {
+					...result,
+					date:
+						result.timestamp === null ? null : iso(result.timestamp),
+					context,
+				};
+			});
+			const envelope = {
+				schema_version: 1,
+				kind: 'pi-session-analytics/search-results',
+				query: {
+					term: term ?? '',
+					limit,
+					project: args.project,
+					session: args.session,
+					record_type: args.type,
+					after: args.after,
+					sort: sort ?? 'relevance',
+				},
+				count: json_results.length,
+				results: json_results,
+			};
 			if (args.json) {
-				const json_results = results.map((r) => {
-					const base = {
-						id: r.id,
-						session_id: r.session_id,
-						project_path: r.project_path,
-						content_text: r.content_text,
-						timestamp: r.timestamp,
-						date: iso(r.timestamp),
-						relevance: r.relevance,
-					};
-					if (context_count > 0) {
-						const ctx = db.get_context_around(
-							r.session_id,
-							r.timestamp,
-							context_count,
-						);
-						return {
-							...base,
-							context: {
-								before: ctx.before.map((m) => ({
-									type: m.type,
-									content_text: m.content_text,
-									date: iso(m.timestamp),
-								})),
-								after: ctx.after.map((m) => ({
-									type: m.type,
-									content_text: m.content_text,
-									date: iso(m.timestamp),
-								})),
-							},
-						};
-					}
-					return base;
-				});
-				console.log(JSON.stringify(json_results, null, 2));
+				console.log(JSON.stringify(envelope, null, 2));
 				return;
 			}
-
-			// Group results by session
-			const grouped = new Map<
-				string,
-				{
-					project_path: string;
-					first_timestamp: number;
-					matches: typeof results;
-				}
-			>();
-
-			for (const r of results) {
-				let group = grouped.get(r.session_id);
-				if (!group) {
-					group = {
-						project_path: r.project_path,
-						first_timestamp: r.timestamp,
-						matches: [],
-					};
-					grouped.set(r.session_id, group);
-				}
-				group.matches.push(r);
-				if (r.timestamp < group.first_timestamp) {
-					group.first_timestamp = r.timestamp;
-				}
+			if (!term) {
+				console.log('No search term provided.');
+				return;
 			}
-
+			if (results.length === 0) {
+				console.log('No matches found.');
+				return;
+			}
 			console.log(
-				`Found ${results.length} matches across ${grouped.size} session(s):\n`,
+				`Found ${results.length} canonical record match${results.length === 1 ? '' : 'es'}:\n`,
 			);
-
-			for (const [session_id, group] of grouped) {
-				const date = new Date(group.first_timestamp)
-					.toISOString()
-					.split('T')[0];
-				const project = group.project_path
-					.split('/')
-					.slice(-2)
-					.join('/');
+			for (const result of results) {
+				const date =
+					result.timestamp === null
+						? 'no timestamp'
+						: iso(result.timestamp);
+				const role = result.message_role
+					? `/${result.message_role}`
+					: '';
 				console.log(
-					`--- ${session_id.slice(0, 8)} | ${date} | ${project} (${group.matches.length} match${group.matches.length === 1 ? '' : 'es'}) ---`,
+					`[${result.record_type}${role}] ${date} | ${result.session_id.slice(0, 12)} | ${result.project_path}`,
 				);
-
-				for (const r of group.matches) {
-					const score = r.relevance.toFixed(2);
-					const snippet = (r.snippet ?? '').replace(/\n/g, ' ');
-					console.log(`  [${score}] ${snippet}`);
-
-					if (context_count > 0) {
-						const ctx = db.get_messages_around(
-							r.session_id,
-							r.timestamp,
-							context_count,
+				console.log(
+					`  ${result.source_path} | generation ${result.archive_generation_id} | bytes ${result.source_byte_offset}:${result.source_byte_length}`,
+				);
+				console.log(
+					`  ${(result.snippet ?? '').replace(/\n/g, ' ')}`,
+				);
+				if (context_count > 0) {
+					const context = db.get_record_context(
+						result.record_id,
+						context_count,
+					);
+					for (const before of context.before) {
+						console.log(
+							`    [${before.record_type}] ${before.content_text.replace(/\n/g, ' ').slice(0, 100)}`,
 						);
-
-						for (const m of ctx.before) {
-							const preview = (m.content_text ?? '')
-								.replace(/\n/g, ' ')
-								.slice(0, 80);
-							console.log(
-								`    [${m.type}] ${preview}${preview.length >= 80 ? '...' : ''}`,
-							);
-						}
-
-						console.log(`    >>> match <<<`);
-
-						for (const m of ctx.after) {
-							const preview = (m.content_text ?? '')
-								.replace(/\n/g, ' ')
-								.slice(0, 80);
-							console.log(
-								`    [${m.type}] ${preview}${preview.length >= 80 ? '...' : ''}`,
-							);
-						}
+					}
+					console.log('    >>> match <<<');
+					for (const after_record of context.after) {
+						console.log(
+							`    [${after_record.record_type}] ${after_record.content_text.replace(/\n/g, ' ').slice(0, 100)}`,
+						);
 					}
 				}
 				console.log();

@@ -102,6 +102,8 @@ export interface SessionRecordInsert {
 	timestamp?: number;
 	raw_json: string;
 	parse_error?: string;
+
+	search_text: string;
 	session_version?: number;
 	cwd?: string;
 	parent_session_path?: string;
@@ -142,6 +144,24 @@ export interface SessionRecordInsert {
 	cost_cache_read?: number;
 	cost_cache_write?: number;
 	cost_total?: number;
+}
+
+/** One full-text match with exact canonical archive provenance. */
+export interface CanonicalSearchResult {
+	record_id: number;
+	session_id: string;
+	project_path: string;
+	source_path: string;
+	archive_generation_id: number;
+	record_type: string;
+	entry_id: string | null;
+	message_role: string | null;
+	content_text: string | null;
+	timestamp: number | null;
+	source_byte_offset: number;
+	source_byte_length: number;
+	snippet: string;
+	relevance: number;
 }
 
 export class Database {
@@ -586,6 +606,7 @@ export class Database {
 			'timestamp',
 			'raw_json',
 			'parse_error',
+			'search_text',
 			'session_version',
 			'cwd',
 			'parent_session_path',
@@ -639,6 +660,8 @@ export class Database {
 			record.timestamp ?? null,
 			record.raw_json,
 			record.parse_error ?? null,
+
+			record.search_text,
 			record.session_version ?? null,
 			record.cwd ?? null,
 			record.parent_session_path ?? null,
@@ -872,6 +895,141 @@ export class Database {
 
 	reset_sync_state() {
 		this.db.exec('DELETE FROM sync_state');
+	}
+
+	/** Search every canonical archived record and return exact provenance. */
+	search_records(
+		term: string,
+		options: {
+			limit?: number;
+			project?: string;
+			session?: string;
+			record_type?: string;
+			after?: number;
+			sort?: 'relevance' | 'time' | 'time-asc';
+		} = {},
+	): CanonicalSearchResult[] {
+		const limit = options.limit ?? 20;
+		const sort = options.sort ?? 'relevance';
+		let query = `
+			SELECT
+				r.id AS record_id,
+				r.session_id,
+				COALESCE(s.project_path, r.cwd, '') AS project_path,
+				r.source_path,
+				r.archive_generation_id,
+				r.record_type,
+				r.entry_id,
+				r.message_role,
+				r.content_text,
+				r.timestamp,
+				r.source_byte_offset,
+				r.source_byte_length,
+				snippet(session_records_fts, 0, '>>>', '<<<', '...', 32) AS snippet,
+				bm25(session_records_fts) AS relevance
+			FROM session_records_fts
+			JOIN session_records r ON r.id = session_records_fts.rowid
+			LEFT JOIN sessions s ON s.id = r.session_id
+			WHERE session_records_fts MATCH ?
+		`;
+		const params: (string | number)[] = [escape_fts5_query(term)];
+		if (options.project) {
+			query += ` AND COALESCE(s.project_path, r.cwd, '') LIKE ?`;
+			params.push(`%${options.project}%`);
+		}
+		if (options.session) {
+			query += ` AND r.session_id LIKE ?`;
+			params.push(`${options.session}%`);
+		}
+		if (options.record_type) {
+			query += ` AND r.record_type = ?`;
+			params.push(options.record_type);
+		}
+		if (options.after !== undefined) {
+			query += ` AND r.timestamp >= ?`;
+			params.push(options.after);
+		}
+		if (sort === 'time') {
+			query += ` ORDER BY COALESCE(r.timestamp, 0) DESC`;
+		} else if (sort === 'time-asc') {
+			query += ` ORDER BY COALESCE(r.timestamp, 0) ASC`;
+		} else {
+			query += ` ORDER BY relevance`;
+		}
+		query += ` LIMIT ?`;
+		params.push(limit);
+		return this.db
+			.prepare(query)
+			.all(...params) as unknown as CanonicalSearchResult[];
+	}
+
+	/** Return neighboring canonical records from the same source history. */
+	get_record_context(
+		record_id: number,
+		count: number,
+	): {
+		before: Array<{
+			record_type: string;
+			content_text: string;
+			timestamp: number | null;
+		}>;
+		after: Array<{
+			record_type: string;
+			content_text: string;
+			timestamp: number | null;
+		}>;
+	} {
+		const target = this.db
+			.prepare(
+				'SELECT source_path, session_id FROM session_records WHERE id = ?',
+			)
+			.get(record_id) as
+			| { source_path: string; session_id: string }
+			| undefined;
+		if (!target || count <= 0) return { before: [], after: [] };
+		const select = `record_type,
+			COALESCE(content_text, summary, error_message, raw_json) AS content_text,
+			timestamp`;
+		const before = this.db
+			.prepare(
+				`SELECT ${select} FROM session_records
+				WHERE source_path = ? AND session_id = ? AND id < ?
+				ORDER BY id DESC LIMIT ?`,
+			)
+			.all(
+				target.source_path,
+				target.session_id,
+				record_id,
+				count,
+			) as Array<{
+			record_type: string;
+			content_text: string;
+			timestamp: number | null;
+		}>;
+		const after = this.db
+			.prepare(
+				`SELECT ${select} FROM session_records
+				WHERE source_path = ? AND session_id = ? AND id > ?
+				ORDER BY id ASC LIMIT ?`,
+			)
+			.all(
+				target.source_path,
+				target.session_id,
+				record_id,
+				count,
+			) as Array<{
+			record_type: string;
+			content_text: string;
+			timestamp: number | null;
+		}>;
+		return { before: before.reverse(), after };
+	}
+
+	/** Rebuild canonical full-text search from stored search documents. */
+	rebuild_record_fts(): void {
+		this.db.exec(
+			"INSERT INTO session_records_fts(session_records_fts) VALUES ('rebuild')",
+		);
 	}
 
 	search(
