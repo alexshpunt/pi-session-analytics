@@ -1,6 +1,7 @@
+.agents/
 node_modules/
 dist/
 *.db
 .DS_Store
-pirecall
-pirecall-*
+pi-session-analytics
+pi-session-analytics-*

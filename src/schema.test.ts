@@ -20,7 +20,7 @@ function user_version(db: DatabaseSync): number {
 	).user_version;
 }
 
-describe('pirecall schema', () => {
+describe('pi-session-analytics schema', () => {
 	test('creates a fresh database and applies migrations', () => {
 		const db = new DatabaseSync(':memory:');
 		apply_schema(db);

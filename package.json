@@ -1,7 +1,7 @@
 {
-	"name": "pirecall",
+	"name": "pi-session-analytics",
 	"version": "0.1.3",
-	"description": "Sync pi.dev agent sessions to SQLite and recall context from past sessions",
+	"description": "Archive and analyze pi.dev agent sessions in SQLite",
 	"keywords": [
 		"analytics",
 		"context",
@@ -10,17 +10,17 @@
 		"recall",
 		"sqlite"
 	],
-	"homepage": "https://github.com/spences10/pirecall#readme",
+	"homepage": "https://github.com/alexshpunt/pi-session-analytics#readme",
 	"bugs": {
-		"url": "https://github.com/spences10/pirecall/issues"
+		"url": "https://github.com/alexshpunt/pi-session-analytics/issues"
 	},
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/spences10/pirecall.git"
+		"url": "git+https://github.com/alexshpunt/pi-session-analytics.git"
 	},
 	"bin": {
-		"pirecall": "./dist/index.js"
+		"pi-session-analytics": "./dist/index.js"
 	},
 	"files": [
 		"dist"

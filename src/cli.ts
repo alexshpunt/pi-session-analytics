@@ -2,7 +2,11 @@ import { defineCommand } from 'citty';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const DEFAULT_DB_PATH = join(process.env.HOME!, '.pi', 'pirecall.db');
+const DEFAULT_DB_PATH = join(
+	process.env.HOME!,
+	'.pi',
+	'pi-session-analytics.db',
+);
 const PACKAGE_VERSION = (
 	JSON.parse(
 		readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -962,10 +966,10 @@ export const schema = defineCommand({
 
 export const main = defineCommand({
 	meta: {
-		name: 'pirecall',
+		name: 'pi-session-analytics',
 		version: PACKAGE_VERSION,
 		description:
-			'Sync pi.dev agent sessions to SQLite and recall context from past sessions',
+			'Archive and analyze pi.dev agent sessions in SQLite',
 	},
 	args: {
 		db: {

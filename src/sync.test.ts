@@ -21,7 +21,9 @@ afterEach(() => {
 
 describe('session metadata backfill', () => {
 	test('indexes the latest name from an unchanged legacy session', async () => {
-		const dir = mkdtempSync(join(tmpdir(), 'pirecall-sync-'));
+		const dir = mkdtempSync(
+			join(tmpdir(), 'pi-session-analytics-sync-'),
+		);
 		dirs.push(dir);
 		const project_dir = join(dir, '--tmp-project--');
 		const file_path = join(project_dir, 'named.jsonl');
@@ -64,7 +66,7 @@ describe('session metadata backfill', () => {
 			`${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`,
 		);
 		const stats = statSync(file_path);
-		const db = new Database(join(dir, 'pirecall.db'));
+		const db = new Database(join(dir, 'pi-session-analytics.db'));
 		db.upsert_session({
 			id: 'legacy-named',
 			project_path: '/tmp/project',

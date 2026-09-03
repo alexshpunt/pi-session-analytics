@@ -1,22 +1,25 @@
-# pirecall
+# Pi Session Analytics
 
 [![built with vite+](https://img.shields.io/badge/built%20with-Vite+-646CFF?logo=vite&logoColor=white)](https://viteplus.dev)
 [![tested with vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 
-Sync [pi.dev](https://pi.dev) agent sessions to SQLite for analytics.
-Query your session history, token usage, tool calls, cost, and model
-switches.
+Archive [pi.dev](https://pi.dev) agent sessions in SQLite. Query your
+session history, token usage, tool calls, cost, and model switches.
+
+This project is a fork of
+[pirecall](https://github.com/spences10/pirecall) by Scott Spence. It
+keeps the original MIT license and copyright notice.
 
 ## Quick Start
 
-Use pirecall inline in pi sessions. Tell the agent:
+Use `pi-session-analytics` inline in Pi sessions. Tell the agent:
 
 ```
-"run npx pirecall sync then show me my top 5 projects by token usage"
+"run npx pi-session-analytics sync then show me my top 5 projects by token usage"
 
-"use npx pirecall search to find sessions where we discussed database migrations"
+"use npx pi-session-analytics search to find sessions where we discussed database migrations"
 
-"run npx pirecall stats and tell me how much I've spent this week"
+"run npx pi-session-analytics stats and tell me how much I've spent this week"
 ```
 
 The agent runs the command, gets structured output, and can answer
@@ -24,14 +27,14 @@ follow-up questions about your session history.
 
 ## Resumable session index
 
-Pirecall remains an archive: deleting a Pi JSONL session does not
-delete its history from the database. Each sync additionally records
-source-file metadata and marks missing sources as unavailable. Resume
-integrations query only live sources:
+Pi Session Analytics remains an archive: deleting a Pi JSONL session
+does not delete its history from the database. Each sync additionally
+records source-file metadata and marks missing sources as unavailable.
+Resume integrations query only live sources:
 
 ```bash
-pirecall resumable --scope all --limit 100 --json
-pirecall resumable --scope project --cwd "$PWD" --query auth --json
+pi-session-analytics resumable --scope all --limit 100 --json
+pi-session-analytics resumable --scope project --cwd "$PWD" --query auth --json
 ```
 
 The command returns a versioned object containing `schema_version`,
@@ -39,7 +42,7 @@ The command returns a versioned object containing `schema_version`,
 same contract without relying on internal SQLite tables:
 
 ```ts
-import { list_resumable_sessions } from 'pirecall/resumable';
+import { list_resumable_sessions } from 'pi-session-analytics/resumable';
 
 const result = await list_resumable_sessions({
 	scope: 'project',
@@ -52,67 +55,68 @@ const result = await list_resumable_sessions({
 Results contain the absolute JSONL `path`; integrations should verify
 it still exists immediately before asking Pi to switch sessions.
 Existing databases are migrated additively when opened. Run
-`pirecall sync --json` once after upgrading to stream and backfill
-session names and source metadata. The backfill is marked complete per
-file, so later syncs remain incremental.
+`pi-session-analytics sync --json` once after upgrading to stream and
+backfill session names and source metadata. The backfill is marked
+complete per file, so later syncs remain incremental.
 
 ## How It Works
 
-Pi stores sessions as JSONL files in `~/.pi/agent/sessions/`. pirecall
-parses these into a SQLite database so you can query across all
-sessions.
+Pi stores sessions as JSONL files in `~/.pi/agent/sessions/`. Pi
+Session Analytics parses these into a SQLite database so you can query
+across all sessions.
 
 **Step 1.** Sync your sessions:
 
 ```bash
-npx pirecall sync
+npx pi-session-analytics sync
 ```
 
-**Step 2.** pirecall incrementally imports new content and reports
-what it found:
+**Step 2.** Pi Session Analytics incrementally imports new content and
+reports what it found:
 
 ```
 Synced 24 sessions, 136 messages, 22 tool calls, 59 model changes
 ```
 
-**Step 3.** Query the database using any pirecall command or raw SQL:
+**Step 3.** Query the database with `pi-session-analytics` or raw SQL:
 
 ```bash
-npx pirecall stats
-npx pirecall search "database migration"
-npx pirecall query "SELECT project_path, SUM(cost_total) FROM sessions s JOIN messages m ON m.session_id = s.id GROUP BY project_path ORDER BY 2 DESC LIMIT 5"
+npx pi-session-analytics stats
+npx pi-session-analytics search "database migration"
+npx pi-session-analytics query "SELECT project_path, SUM(cost_total) FROM sessions s JOIN messages m ON m.session_id = s.id GROUP BY project_path ORDER BY 2 DESC LIMIT 5"
 ```
 
-> **Important:** The agent doesn't know about pirecall unless you
-> mention it. Just mention `{npx,pnpx,bunx} pirecall` and the agent
-> will discover subcommands and flags from the CLI output.
+> **Important:** The agent doesn't know about `pi-session-analytics`
+> unless you mention it. Mention
+> `{npx,pnpx,bunx} pi-session-analytics` and the agent will discover
+> subcommands and flags from the CLI output.
 
 ## Commands
 
 ```bash
-npx pirecall sync                  # Import sessions (incremental)
-npx pirecall stats                 # Session/message/token/cost counts
-npx pirecall sessions              # List recent sessions
-npx pirecall resumable --json      # List live sessions for resume UIs
-npx pirecall search <term>         # Full-text search across messages
-npx pirecall tools                 # Most-used tools
-npx pirecall recall <term>         # LLM-optimised context retrieval
-npx pirecall query "<sql>"         # Raw SQL against the database
-npx pirecall schema                # Show database table structure
-npx pirecall compact               # Prune old tool results
+npx pi-session-analytics sync                  # Import sessions (incremental)
+npx pi-session-analytics stats                 # Session/message/token/cost counts
+npx pi-session-analytics sessions              # List recent sessions
+npx pi-session-analytics resumable --json      # List live sessions for resume UIs
+npx pi-session-analytics search <term>         # Full-text search across messages
+npx pi-session-analytics tools                 # Most-used tools
+npx pi-session-analytics recall <term>         # LLM-optimised context retrieval
+npx pi-session-analytics query "<sql>"         # Raw SQL against the database
+npx pi-session-analytics schema                # Show database table structure
+npx pi-session-analytics compact               # Prune old tool results
 ```
 
 All commands support `--json` for programmatic output and
 `-d, --db <path>` to use a custom database path (default:
-`~/.pi/pirecall.db`).
+`~/.pi/pi-session-analytics.db`).
 
 ## Schema migrations
 
 `src/schema.sql` creates the base database schema. `src/schema.ts`
 loads that file, checks `PRAGMA user_version`, and transactionally
 applies newer SQL files from `src/migrations/`. Builds copy the schema
-and migrations into `dist`. Older unversioned pirecall databases are
-detected and adopted without deleting archive data.
+and migrations into `dist`. Older unversioned Pi Session Analytics
+databases are detected and adopted without deleting archive data.
 
 ## Database Schema
 
@@ -190,8 +194,7 @@ erDiagram
 ### Model/Provider Tracking
 
 Tracks mid-session model switches from `~/.pi/agent/sessions/`. Pi
-supports multiple providers (Anthropic, Mistral, etc.) and pirecall
-records every switch with provider and model ID.
+Session Analytics records every switch with its provider and model ID.
 
 **Why track model changes?**
 

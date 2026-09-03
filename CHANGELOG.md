@@ -1,4 +1,4 @@
-# pirecall
+# Pi Session Analytics
 
 ## 0.1.3
 

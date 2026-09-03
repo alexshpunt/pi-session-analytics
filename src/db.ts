@@ -5,7 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
 import { apply_schema } from './schema.ts';
 
-const DEFAULT_DB_PATH = join(process.env.HOME!, '.pi', 'pirecall.db');
+const DEFAULT_DB_PATH = join(
+	process.env.HOME!,
+	'.pi',
+	'pi-session-analytics.db',
+);
 
 /**
  * Escape a search term for FTS5 MATCH queries.

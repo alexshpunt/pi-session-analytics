@@ -74,7 +74,7 @@ function detect_legacy_version(db: DatabaseSync): number {
 	);
 	if (missing_tables.length > 0) {
 		throw new Error(
-			`Unversioned pirecall database has an unrecognized schema; missing tables: ${missing_tables.join(', ')}`,
+			`Unversioned pi-session-analytics database has an unrecognized schema; missing tables: ${missing_tables.join(', ')}`,
 		);
 	}
 	const columns = new Set(
@@ -90,7 +90,7 @@ function detect_legacy_version(db: DatabaseSync): number {
 	if (resumable_count === 0) return 1;
 	if (resumable_count === RESUMABLE_COLUMNS.length) return 2;
 	throw new Error(
-		'Unversioned pirecall database has a partially applied resumable-session migration',
+		'Unversioned pi-session-analytics database has a partially applied resumable-session migration',
 	);
 }
 
@@ -123,7 +123,7 @@ export function apply_schema(db: DatabaseSync): void {
 	}
 	if (current_version > LATEST_SCHEMA_VERSION) {
 		throw new Error(
-			`Pirecall database schema version ${current_version} is newer than supported version ${LATEST_SCHEMA_VERSION}`,
+			`pi-session-analytics database schema version ${current_version} is newer than supported version ${LATEST_SCHEMA_VERSION}`,
 		);
 	}
 	for (
@@ -134,7 +134,7 @@ export function apply_schema(db: DatabaseSync): void {
 		const migration = MIGRATIONS[next_version];
 		if (!migration) {
 			throw new Error(
-				`Missing pirecall migration for schema version ${next_version}`,
+				`Missing pi-session-analytics migration for schema version ${next_version}`,
 			);
 		}
 		run_migration(db, next_version, migration);

@@ -15,15 +15,33 @@ import {
 } from './cli.ts';
 
 describe('CLI', () => {
-	test('main command uses the package version', () => {
+	test('main command uses the package identity and version', () => {
 		const package_json = JSON.parse(
 			readFileSync(
 				new URL('../package.json', import.meta.url),
 				'utf8',
 			),
-		) as { version: string };
+		) as {
+			name: string;
+			version: string;
+			bin: Record<string, string>;
+			repository: { url: string };
+			bugs: { url: string };
+		};
+		expect(package_json.name).toBe('pi-session-analytics');
+		expect(package_json.bin).toEqual({
+			'pi-session-analytics': './dist/index.js',
+		});
+		expect(package_json.repository.url).toContain(
+			'alexshpunt/pi-session-analytics',
+		);
+		expect(package_json.bugs.url).toContain(
+			'alexshpunt/pi-session-analytics',
+		);
 		expect(main).toBeDefined();
-		expect((main.meta as { name: string })?.name).toBe('pirecall');
+		expect((main.meta as { name: string })?.name).toBe(
+			'pi-session-analytics',
+		);
 		expect((main.meta as { version: string })?.version).toBe(
 			package_json.version,
 		);
@@ -63,10 +81,16 @@ describe('CLI', () => {
 		expect((search.meta as { name: string })?.name).toBe('search');
 	});
 
-	test('main command has --db option', () => {
-		const args = main.args as Record<string, { type: string }>;
+	test('main command has --db option with the analytics database default', () => {
+		const args = main.args as Record<
+			string,
+			{ type: string; description: string }
+		>;
 		expect(args?.db).toBeDefined();
 		expect(args?.db.type).toBe('string');
+		expect(args?.db.description).toContain(
+			'.pi/pi-session-analytics.db',
+		);
 	});
 
 	test('sync command has --verbose option', () => {
