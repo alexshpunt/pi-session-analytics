@@ -99,10 +99,12 @@ describe('CLI', () => {
 		expect(args?.verbose.type).toBe('boolean');
 	});
 
-	test('sync command has --db option', () => {
+	test('sync command has --db and --archive options', () => {
 		const args = sync.args as Record<string, { type: string }>;
 		expect(args?.db).toBeDefined();
 		expect(args?.db.type).toBe('string');
+		expect(args?.archive).toBeDefined();
+		expect(args?.archive.type).toBe('string');
 	});
 
 	test('stats command has --db option', () => {

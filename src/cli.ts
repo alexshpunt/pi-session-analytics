@@ -7,6 +7,12 @@ const DEFAULT_DB_PATH = join(
 	'.pi',
 	'pi-session-analytics.db',
 );
+const DEFAULT_ARCHIVE_PATH = join(
+	process.env.HOME!,
+	'.pi',
+	'pi-session-analytics',
+	'archive',
+);
 const PACKAGE_VERSION = (
 	JSON.parse(
 		readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -42,6 +48,11 @@ export const sync = defineCommand({
 			alias: 'v',
 			description: 'Show detailed output',
 		},
+
+		archive: {
+			type: 'string',
+			description: `Archive path (default: ${DEFAULT_ARCHIVE_PATH})`,
+		},
 	},
 	async run({ args }) {
 		const { Database } = await import('./db.ts');
@@ -55,6 +66,8 @@ export const sync = defineCommand({
 			const result = await sync_sessions(
 				db,
 				Boolean(args.verbose && !args.json),
+				undefined,
+				args.archive ?? DEFAULT_ARCHIVE_PATH,
 			);
 
 			if (args.json) {
@@ -69,6 +82,11 @@ Done!
   Duplicate IDs:      ${result.discovery.excluded.duplicate_session_id}
   Non-session files:  ${result.discovery.excluded.non_session}
   Malformed JSON:     ${result.discovery.excluded.malformed_json}
+
+  Archive generations:${result.archive.generations_added}
+  Archive chunks:     ${result.archive.chunks_added}
+  Archive bytes:      ${result.archive.bytes_added}
+  Missing sources:    ${result.archive.sources_missing}
   Files processed:    ${result.files_processed}
   Messages added:     ${result.messages_added}
   Sessions added:     ${result.sessions_added}

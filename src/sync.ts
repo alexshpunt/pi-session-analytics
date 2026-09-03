@@ -9,6 +9,8 @@ import {
 import { join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { glob } from 'tinyglobby';
+
+import { DEFAULT_ARCHIVE_DIR, SessionArchive } from './archive.ts';
 import { Database } from './db.ts';
 import { parse_file } from './parser.ts';
 
@@ -30,6 +32,14 @@ export interface SessionDiscoveryStats {
 	};
 }
 
+/** Durable source-archive changes made during one sync. */
+export interface ArchiveSyncStats {
+	generations_added: number;
+	chunks_added: number;
+	bytes_added: number;
+	sources_missing: number;
+}
+
 /** Result returned by one incremental session sync. */
 export interface SyncResult {
 	files_scanned: number;
@@ -40,6 +50,8 @@ export interface SyncResult {
 	tool_results_added: number;
 	model_changes_added: number;
 	discovery: SessionDiscoveryStats;
+
+	archive: ArchiveSyncStats;
 }
 
 /** Discover and incrementally import each native Pi session under a sessions root. */
@@ -47,6 +59,9 @@ export async function sync(
 	db: Database,
 	verbose = false,
 	sessions_dir = SESSIONS_DIR,
+	archive_dir = sessions_dir === SESSIONS_DIR
+		? DEFAULT_ARCHIVE_DIR
+		: join(sessions_dir, '.pi-session-analytics-archive'),
 ): Promise<SyncResult> {
 	const result: SyncResult = {
 		files_scanned: 0,
@@ -66,12 +81,27 @@ export async function sync(
 				non_session: 0,
 			},
 		},
+
+		archive: {
+			generations_added: 0,
+			chunks_added: 0,
+			bytes_added: 0,
+			sources_missing: 0,
+		},
 	};
+
+	const archive = new SessionArchive(db, archive_dir);
+	const seen_at = Date.now();
 
 	if (!existsSync(sessions_dir)) {
 		if (verbose) {
 			console.log(`Sessions directory not found: ${sessions_dir}`);
 		}
+		db.begin();
+		db.mark_all_archive_sources_missing();
+		result.archive.sources_missing =
+			db.count_missing_archive_sources();
+		db.commit();
 		return result;
 	}
 
@@ -86,11 +116,11 @@ export async function sync(
 	}
 
 	const seen_sessions = new Set<string>();
-	const seen_at = Date.now();
 	let file_idx = 0;
 
 	db.disable_foreign_keys();
 	db.begin();
+	db.mark_all_archive_sources_missing();
 
 	for (const { file_path, header } of files) {
 		file_idx++;
@@ -101,6 +131,15 @@ export async function sync(
 		}
 		const file_stats = statSync(file_path);
 		const last_modified = file_stats.mtimeMs;
+
+		const archived = archive.archive_source(
+			file_path,
+			header.id,
+			seen_at,
+		);
+		if (archived.generation_added) result.archive.generations_added++;
+		result.archive.chunks_added += archived.chunks_added;
+		result.archive.bytes_added += archived.bytes_added;
 
 		const sync_state = db.get_sync_state(file_path);
 		const backfilled_metadata =
@@ -269,6 +308,8 @@ export async function sync(
 	}
 
 	db.mark_unseen_sources_missing(seen_at);
+
+	result.archive.sources_missing = db.count_missing_archive_sources();
 	db.commit();
 	db.enable_foreign_keys();
 

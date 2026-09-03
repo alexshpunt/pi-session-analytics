@@ -61,9 +61,13 @@ complete per file, so later syncs remain incremental.
 
 ## How It Works
 
-Pi stores sessions as JSONL files in `~/.pi/agent/sessions/`. Pi
-Session Analytics parses these into a SQLite database so you can query
-across all sessions.
+Pi stores sessions as JSONL files in `~/.pi/agent/sessions/`. During
+sync, Pi Session Analytics first preserves every selected session in
+an owner-only, content-addressed archive at
+`~/.pi/pi-session-analytics/archive/`, then parses it into SQLite.
+Older archive generations remain available when Pi rewrites or deletes
+the source. Use `sync --archive <path>` to choose another archive
+location.
 
 **Step 1.** Sync your sessions:
 

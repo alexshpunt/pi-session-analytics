@@ -52,6 +52,42 @@ interface SyncState {
 	metadata_indexed: number;
 }
 
+/** Metadata for one archived Pi session source path. */
+export interface ArchiveSourceRecord {
+	source_path: string;
+	session_id: string;
+	current_generation_id: number | null;
+	source_exists: number;
+	source_mtime_ms: number;
+	source_size_bytes: number;
+	first_seen_at: number;
+	last_seen_at: number;
+}
+
+/** One immutable byte generation of an archived session source. */
+export interface ArchiveGenerationRecord {
+	id: number;
+	source_path: string;
+	session_id: string;
+	generation_number: number;
+	kind: 'base' | 'append' | 'rewrite';
+	previous_generation_id: number | null;
+	content_parent_generation_id: number | null;
+	size_bytes: number;
+	content_sha256: string;
+	source_mtime_ms: number;
+	observed_at: number;
+}
+
+/** One content chunk referenced by an archive generation. */
+export interface ArchiveGenerationChunkRecord {
+	generation_id: number;
+	ordinal: number;
+	chunk_hash: string;
+	source_offset: number;
+	size_bytes: number;
+}
+
 export class Database {
 	private db: DatabaseSync;
 	private db_path: string;
@@ -292,6 +328,179 @@ export class Database {
 			change.model_id,
 			change.timestamp,
 		);
+	}
+
+	/** Return archive tracking metadata for one source path. */
+	get_archive_source(
+		source_path: string,
+	): ArchiveSourceRecord | undefined {
+		return this.db
+			.prepare('SELECT * FROM archive_sources WHERE source_path = ?')
+			.get(source_path) as ArchiveSourceRecord | undefined;
+	}
+
+	/** Return every archived generation for a source in observation order. */
+	list_archive_generations(
+		source_path: string,
+	): ArchiveGenerationRecord[] {
+		return this.db
+			.prepare(
+				'SELECT * FROM archive_generations WHERE source_path = ? ORDER BY generation_number',
+			)
+			.all(source_path) as unknown as ArchiveGenerationRecord[];
+	}
+
+	/** Return one archived generation by its stable database ID. */
+	get_archive_generation(
+		id: number,
+	): ArchiveGenerationRecord | undefined {
+		return this.db
+			.prepare('SELECT * FROM archive_generations WHERE id = ?')
+			.get(id) as ArchiveGenerationRecord | undefined;
+	}
+
+	/** Return the ordered content chunks introduced by one generation. */
+	get_archive_generation_chunks(
+		generation_id: number,
+	): ArchiveGenerationChunkRecord[] {
+		return this.db
+			.prepare(
+				'SELECT * FROM archive_generation_chunks WHERE generation_id = ? ORDER BY ordinal',
+			)
+			.all(
+				generation_id,
+			) as unknown as ArchiveGenerationChunkRecord[];
+	}
+
+	/** Mark an archive source as observed and update its current file metadata. */
+	upsert_archive_source_seen(source: {
+		source_path: string;
+		session_id: string;
+		mtime_ms: number;
+		size_bytes: number;
+		seen_at: number;
+	}): void {
+		this.db
+			.prepare(
+				`INSERT INTO archive_sources (
+					source_path, session_id, current_generation_id,
+					source_exists, source_mtime_ms, source_size_bytes,
+					first_seen_at, last_seen_at
+				) VALUES (?, ?, NULL, 1, ?, ?, ?, ?)
+				ON CONFLICT(source_path) DO UPDATE SET
+					session_id = excluded.session_id,
+					source_exists = 1,
+					source_mtime_ms = excluded.source_mtime_ms,
+					source_size_bytes = excluded.source_size_bytes,
+					last_seen_at = excluded.last_seen_at`,
+			)
+			.run(
+				source.source_path,
+				source.session_id,
+				source.mtime_ms,
+				source.size_bytes,
+				source.seen_at,
+				source.seen_at,
+			);
+	}
+
+	/** Register immutable chunk metadata if the content is new. */
+	insert_archive_chunk(
+		hash: string,
+		size_bytes: number,
+		created_at: number,
+	): boolean {
+		const result = this.db
+			.prepare(
+				'INSERT OR IGNORE INTO archive_chunks (hash, size_bytes, created_at) VALUES (?, ?, ?)',
+			)
+			.run(hash, size_bytes, created_at);
+		return Number(result.changes) > 0;
+	}
+
+	/** Insert one immutable archive generation and return its database ID. */
+	insert_archive_generation(generation: {
+		source_path: string;
+		session_id: string;
+		generation_number: number;
+		kind: ArchiveGenerationRecord['kind'];
+		previous_generation_id?: number;
+		content_parent_generation_id?: number;
+		size_bytes: number;
+		content_sha256: string;
+		source_mtime_ms: number;
+		observed_at: number;
+	}): number {
+		const result = this.db
+			.prepare(
+				`INSERT INTO archive_generations (
+					source_path, session_id, generation_number, kind,
+					previous_generation_id, content_parent_generation_id,
+					size_bytes, content_sha256, source_mtime_ms, observed_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				generation.source_path,
+				generation.session_id,
+				generation.generation_number,
+				generation.kind,
+				generation.previous_generation_id ?? null,
+				generation.content_parent_generation_id ?? null,
+				generation.size_bytes,
+				generation.content_sha256,
+				generation.source_mtime_ms,
+				generation.observed_at,
+			);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Link one ordered content chunk to an archive generation. */
+	insert_archive_generation_chunk(
+		chunk: ArchiveGenerationChunkRecord,
+	): void {
+		this.db
+			.prepare(
+				`INSERT INTO archive_generation_chunks (
+					generation_id, ordinal, chunk_hash, source_offset, size_bytes
+				) VALUES (?, ?, ?, ?, ?)`,
+			)
+			.run(
+				chunk.generation_id,
+				chunk.ordinal,
+				chunk.chunk_hash,
+				chunk.source_offset,
+				chunk.size_bytes,
+			);
+	}
+
+	/** Point a source at its latest committed archive generation. */
+	set_archive_current_generation(
+		source_path: string,
+		generation_id: number,
+	): void {
+		this.db
+			.prepare(
+				'UPDATE archive_sources SET current_generation_id = ? WHERE source_path = ?',
+			)
+			.run(generation_id, source_path);
+	}
+
+	/** Mark every archive source missing before the current pass observes live ones. */
+	mark_all_archive_sources_missing(): void {
+		this.db
+			.prepare('UPDATE archive_sources SET source_exists = 0')
+			.run();
+	}
+
+	/** Count archive sources that are currently missing. */
+	count_missing_archive_sources(): number {
+		return (
+			this.db
+				.prepare(
+					'SELECT COUNT(*) AS count FROM archive_sources WHERE source_exists = 0',
+				)
+				.get() as { count: number }
+		).count;
 	}
 
 	get_sync_state(file_path: string): SyncState | undefined {
