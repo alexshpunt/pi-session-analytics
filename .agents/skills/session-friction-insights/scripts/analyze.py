@@ -147,19 +147,15 @@ def infer_recovery(connection, occurrence):
         """
         SELECT calls.tool_call_id, calls.tool_name, calls.event_index
         FROM tool_calls calls
-        JOIN tool_results results
-          ON results.session_id = calls.session_id
-         AND results.tool_call_id = calls.tool_call_id
         WHERE calls.session_id = ? AND calls.turn_index = ?
-          AND calls.event_index > ? AND results.is_error = 0
-        ORDER BY (calls.tool_name = ?) DESC, calls.event_index, calls.id
+          AND calls.event_index > ?
+        ORDER BY calls.event_index, calls.id
         LIMIT 1
         """,
         (
             occurrence["session_id"],
             occurrence["turn_index"],
             boundary,
-            occurrence["tool_name"],
         ),
     ).fetchone()
     if row is None:

@@ -1,4 +1,5 @@
 import importlib.util
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -54,6 +55,46 @@ class ClassificationTests(unittest.TestCase):
         first = ANALYZE.normalized_signature("start anchor LINE#A123 is stale at 42")
         second = ANALYZE.normalized_signature("start anchor LINE#B456 is stale at 99")
         self.assertEqual(first, second)
+
+    def test_recovery_uses_first_call_after_result_not_parallel_or_later_same_tool(
+        self,
+    ):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE tool_calls (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT,
+                tool_call_id TEXT,
+                tool_name TEXT,
+                turn_index INTEGER,
+                event_index INTEGER
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO tool_calls VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (1, "session", "parallel", "search", 1, 15),
+                (2, "session", "immediate", "read", 1, 21),
+                (3, "session", "later-same", "search", 1, 22),
+            ],
+        )
+
+        recovery = ANALYZE.infer_recovery(
+            connection,
+            {
+                "session_id": "session",
+                "turn_index": 1,
+                "tool_name": "search",
+                "call_event_index": 10,
+                "result_event_index": 20,
+            },
+        )
+
+        self.assertEqual(recovery["status"], "inferred_alternate_tool")
+        self.assertEqual(recovery["tool_call_id"], "immediate")
 
 
 if __name__ == "__main__":
