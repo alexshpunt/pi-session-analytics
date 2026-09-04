@@ -1,7 +1,10 @@
-.agents/
+.agents/*
+!.agents/skills/
+!.agents/skills/**
 node_modules/
 dist/
 *.db
+__pycache__/
 .DS_Store
 pi-session-analytics
 pi-session-analytics-*
