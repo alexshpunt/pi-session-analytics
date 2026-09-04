@@ -96,10 +96,24 @@ npx pi-session-analytics search "database migration"
 npx pi-session-analytics query "SELECT project_path, SUM(cost_total) FROM sessions s JOIN messages m ON m.session_id = s.id GROUP BY project_path ORDER BY 2 DESC LIMIT 5"
 ```
 
-> **Important:** The agent doesn't know about `pi-session-analytics`
-> unless you mention it. Mention
-> `{npx,pnpx,bunx} pi-session-analytics` and the agent will discover
-> subcommands and flags from the CLI output.
+## Agent skill
+
+Install the package through Pi to load its agent skills as well as the
+CLI:
+
+```bash
+pi install npm:pi-session-analytics
+```
+
+The `pi-session-analytics` skill teaches agents when to sync and
+verify, which report answers each kind of question, how to use
+read-only SQL, and how to preserve provenance and uncertainty. The
+focused `session-friction-insights` skill handles search, read, and
+stale-anchor failure analysis.
+
+Running the CLI only through `{npx,pnpx,bunx}` does not load package
+skills. In that case, mention `pi-session-analytics` in the prompt so
+the agent discovers commands from CLI help.
 
 ## Commands
 

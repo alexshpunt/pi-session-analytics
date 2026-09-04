@@ -7,6 +7,7 @@
 		"context",
 		"memory",
 		"pi",
+		"pi-package",
 		"recall",
 		"sqlite"
 	],
@@ -23,7 +24,9 @@
 		"pi-session-analytics": "./dist/index.js"
 	},
 	"files": [
-		"dist"
+		"dist",
+		".agents/skills/pi-session-analytics",
+		".agents/skills/session-friction-insights"
 	],
 	"type": "module",
 	"exports": {
@@ -63,5 +66,11 @@
 	"engines": {
 		"node": ">=22.0.0"
 	},
-	"packageManager": "pnpm@11.24.0"
+	"packageManager": "pnpm@11.24.0",
+	"pi": {
+		"skills": [
+			"./.agents/skills/pi-session-analytics",
+			"./.agents/skills/session-friction-insights"
+		]
+	}
 }

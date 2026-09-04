@@ -6,5 +6,5 @@ dist/
 *.db
 __pycache__/
 .DS_Store
-pi-session-analytics
-pi-session-analytics-*
+/pi-session-analytics
+/pi-session-analytics-*
