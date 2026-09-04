@@ -1,15 +1,13 @@
 {
 	"name": "pi-session-analytics",
 	"version": "0.1.3",
-	"description": "Archive and analyze pi.dev agent sessions in SQLite",
+	"description": "Compact offline analytics for ordered Pi tool activity",
 	"keywords": [
 		"analytics",
-		"context",
-		"memory",
 		"pi",
 		"pi-package",
-		"recall",
-		"sqlite"
+		"sqlite",
+		"tool-use"
 	],
 	"homepage": "https://github.com/alexshpunt/pi-session-analytics#readme",
 	"bugs": {
@@ -25,22 +23,19 @@
 	},
 	"files": [
 		"dist",
-		".agents/skills/pi-session-analytics",
-		".agents/skills/session-friction-insights"
+		".agents/skills/pi-session-analytics/SKILL.md",
+		".agents/skills/session-friction-insights/SKILL.md",
+		".agents/skills/session-friction-insights/scripts/analyze.py"
 	],
 	"type": "module",
 	"exports": {
 		".": {
-			"types": "./dist/resumable.d.ts",
-			"import": "./dist/resumable.js"
-		},
-		"./resumable": {
-			"types": "./dist/resumable.d.ts",
-			"import": "./dist/resumable.js"
+			"types": "./dist/api.d.ts",
+			"import": "./dist/api.js"
 		}
 	},
 	"scripts": {
-		"build": "vp pack && cp src/schema.sql dist/schema.sql && mkdir -p dist/migrations && cp src/migrations/*.sql dist/migrations/",
+		"build": "vp pack && cp src/schema.sql dist/schema.sql",
 		"dev": "vp pack --watch",
 		"start": "node ./dist/index.js",
 		"check": "vp check",

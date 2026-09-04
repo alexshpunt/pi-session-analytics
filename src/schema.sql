@@ -1,99 +1,109 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT INTO metadata(key, value) VALUES ('schema_kind', 'compact-tool-events');
+INSERT INTO metadata(key, value) VALUES ('schema_version', '1');
+
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   project_path TEXT NOT NULL,
-  cwd TEXT,
-  first_timestamp INTEGER,
-  last_timestamp INTEGER
+  first_timestamp INTEGER NOT NULL,
+  last_timestamp INTEGER NOT NULL,
+  current_source_path TEXT,
+  source_exists INTEGER NOT NULL DEFAULT 1,
+  last_seen_at INTEGER
 );
 
-CREATE TABLE messages (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  parent_id TEXT,
-  type TEXT NOT NULL,
-  provider TEXT,
-  model TEXT,
-  content_text TEXT,
-  content_json TEXT,
-  thinking TEXT,
-  timestamp INTEGER NOT NULL,
-  input_tokens INTEGER DEFAULT 0,
-  output_tokens INTEGER DEFAULT 0,
-  cache_read_tokens INTEGER DEFAULT 0,
-  cache_write_tokens INTEGER DEFAULT 0,
-  cost_total REAL DEFAULT 0,
+CREATE TABLE session_sources (
+  session_id TEXT PRIMARY KEY,
+  current_path TEXT NOT NULL,
+  source_mtime_ms REAL NOT NULL,
+  source_size_bytes INTEGER NOT NULL,
+  processed_bytes INTEGER NOT NULL,
+  processed_prefix_sha256 TEXT NOT NULL,
+  last_seen_at INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
-CREATE TABLE sync_state (
-  file_path TEXT PRIMARY KEY,
-  last_modified INTEGER NOT NULL,
-  last_byte_offset INTEGER NOT NULL
-);
-
 CREATE TABLE tool_calls (
-  id TEXT PRIMARY KEY,
-  message_id TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
   tool_name TEXT NOT NULL,
-  tool_input TEXT,
-  timestamp INTEGER NOT NULL,
-  FOREIGN KEY (message_id) REFERENCES messages(id),
+  turn_index INTEGER NOT NULL,
+  event_index INTEGER NOT NULL,
+  timestamp INTEGER,
+  provider TEXT,
+  model TEXT,
+  arguments_codec TEXT NOT NULL DEFAULT 'deflate-raw',
+  arguments_blob BLOB NOT NULL,
+  arguments_sha256 TEXT NOT NULL,
+  arguments_bytes INTEGER NOT NULL,
+  argument_shape TEXT NOT NULL,
+  source_path TEXT,
+  source_byte_offset INTEGER,
+  source_block_index INTEGER,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  UNIQUE (session_id, tool_call_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
 CREATE TABLE tool_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
   tool_call_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  turn_index INTEGER NOT NULL,
+  event_index INTEGER NOT NULL,
+  timestamp INTEGER,
+  is_error INTEGER NOT NULL,
+  payload_codec TEXT NOT NULL DEFAULT 'deflate-raw',
+  payload_blob BLOB NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  payload_bytes INTEGER NOT NULL,
+  error_fingerprint TEXT,
+  source_path TEXT,
+  source_byte_offset INTEGER,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  UNIQUE (session_id, tool_call_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE usage_records (
+  session_id TEXT NOT NULL,
   message_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  content TEXT,
-  is_error INTEGER DEFAULT 0,
+  project_path TEXT NOT NULL,
   timestamp INTEGER NOT NULL,
-  FOREIGN KEY (tool_call_id) REFERENCES tool_calls(id),
-  FOREIGN KEY (message_id) REFERENCES messages(id),
-  FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
-
-CREATE TABLE model_changes (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  parent_id TEXT,
   provider TEXT,
-  model_id TEXT,
-  timestamp INTEGER NOT NULL,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_recorded INTEGER NOT NULL DEFAULT 0,
+  cost_input REAL NOT NULL DEFAULT 0,
+  cost_output REAL NOT NULL DEFAULT 0,
+  cost_cache_read REAL NOT NULL DEFAULT 0,
+  cost_cache_write REAL NOT NULL DEFAULT 0,
+  cost_total REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, message_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
-CREATE INDEX idx_messages_session ON messages(session_id);
-CREATE INDEX idx_messages_timestamp ON messages(timestamp);
-CREATE INDEX idx_sessions_project ON sessions(project_path);
-CREATE INDEX idx_tool_calls_session ON tool_calls(session_id);
+CREATE INDEX idx_tool_calls_order ON tool_calls(session_id, event_index, id);
 CREATE INDEX idx_tool_calls_name ON tool_calls(tool_name);
-CREATE INDEX idx_tool_results_session ON tool_results(session_id);
-CREATE INDEX idx_tool_results_call ON tool_results(tool_call_id);
-CREATE INDEX idx_model_changes_session ON model_changes(session_id);
+CREATE INDEX idx_tool_calls_model ON tool_calls(provider, model);
+CREATE INDEX idx_tool_results_order ON tool_results(session_id, event_index, id);
+CREATE INDEX idx_tool_results_error ON tool_results(is_error, tool_name);
+CREATE INDEX idx_usage_timestamp ON usage_records(timestamp);
+CREATE INDEX idx_usage_model ON usage_records(provider, model);
+CREATE INDEX idx_usage_project ON usage_records(project_path);
 
-CREATE VIRTUAL TABLE messages_fts USING fts5(
-  content_text,
-  thinking,
-  content='messages',
-  content_rowid='rowid'
-);
-
-CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
-  INSERT INTO messages_fts(rowid, content_text, thinking)
-  VALUES (new.rowid, new.content_text, new.thinking);
-END;
-
-CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content_text, thinking)
-  VALUES ('delete', old.rowid, old.content_text, old.thinking);
-END;
-
-CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content_text, thinking)
-  VALUES ('delete', old.rowid, old.content_text, old.thinking);
-  INSERT INTO messages_fts(rowid, content_text, thinking)
-  VALUES (new.rowid, new.content_text, new.thinking);
-END;
+PRAGMA user_version = 1;

@@ -1,100 +1,76 @@
 ---
 name: session-friction-insights
 description:
-  Extracts actionable failure and friction insights from a local
-  pi-session-analytics database. Use whenever the user asks which Pi
+  Extract actionable failure and friction insights from a compact
+  local pi-session-analytics database. Use when the user asks which Pi
   tools fail, why search returned nothing, why read was unhelpful,
   what stale anchors occur, how agents recover, or what tool behavior
-  should be improved. Focus on non-happy paths and exact archive
-  provenance.
+  should improve.
 compatibility:
-  Requires Python 3 and a verified pi-session-analytics SQLite
+  Requires Python 3 and a verified compact pi-session-analytics SQLite
   database.
 ---
 
 # Session friction insights
 
-Turn accumulated Pi sessions into a short list of things worth fixing.
-The sessions and database are inputs; the insight is the result.
+Turn recorded Pi tool activity into a short list of things worth
+fixing. Focus on non-happy paths. Do not treat volume alone as an
+insight.
 
-## Safety and privacy
+## Safety and evidence
 
-- Keep generated reports under `.agents/insights/`; this repository
-  ignores that private content.
-- Do not publish raw arguments, session text, paths, or generated
-  reports unless the user explicitly asks.
-- Do not delete native sessions, the database, or the archive as part
-  of analysis. Deletion is a separate user decision after the insight
-  is reviewed.
-- Treat `is_error = 1` as a recorded failure. Label empty results and
-  other semantic judgements as inferred friction.
+- Keep generated reports under `.agents/insights/`.
+- Do not publish raw payloads, paths, or reports unless the user asks.
+- Do not delete native sessions or stored analysis as part of this
+  skill.
+- `is_error = 1` is a recorded hard failure.
+- Missing results, empty-result friction, and recovery are inferred.
+- Cite the session ID, tool call ID, event index, source path, and
+  source byte offset. The compact database does not claim
+  archived-byte provenance.
 
-## Before analysis
-
-Use the repository CLI and verify the database first:
+## Prepare the database
 
 ```bash
-pnpm run build
+pnpm build
+node dist/index.js sync --json
 node dist/index.js verify --deep --json
 ```
 
-If the database does not exist, sync it before verification:
+Stop if verification fails.
 
-```bash
-node dist/index.js sync --json
-```
-
-A changing live corpus may need one final sync before verification.
-Never hide a failed verification.
-
-## Extract the focused report
-
-Resolve this skill directory, then run:
+## Build the report
 
 ```bash
 python3 <skill-dir>/scripts/analyze.py \
   --db "$HOME/.pi/pi-session-analytics.db" \
-  --archive "$HOME/.pi/pi-session-analytics/archive" \
   --output .agents/insights/session-friction.md \
   --json-output .agents/insights/session-friction.json
 ```
 
-Use `--format json` for machine-readable output. Running the same
-command twice against an unchanged database must produce identical
-bytes.
+Use `--format json` for stdout JSON. The same database and options
+must produce the same report bytes.
 
-The analyzer intentionally includes only:
+The analyzer includes:
 
-- recorded search/read failures;
-- inferred empty search and empty read outcomes;
-- recorded stale-anchor failures from edit tools;
-- search/read/edit calls with no recorded result;
-- the inferred recovery observed before the next user message.
+- recorded search and read errors;
+- inferred empty search and read results;
+- recorded stale or invalid edit anchors;
+- target tool calls without a result;
+- inferred next-call recovery in the same user turn.
 
-## Turn clusters into insights
+## Turn clusters into findings
 
-Read the highest-frequency clusters and representative examples. For
-each proposed improvement, state:
+For each proposed change, state:
 
-1. **Evidence** — recorded or inferred category, count, tools, and
-   exact provenance.
-2. **Friction** — what useful work failed to happen.
-3. **Recovery** — same-tool retry, alternate-tool recovery, or
-   unresolved; always call this inferred.
-4. **Improvement lever** — tool contract, error message, agent
-   strategy, or documentation.
-5. **Confidence** — high only when the evidence and recovery pattern
-   support the claim.
+1. the recorded or inferred evidence and count;
+2. what useful work did not happen;
+3. the inferred recovery pattern;
+4. the smallest tool, error-message, agent, or documentation change;
+5. confidence and what evidence limits it.
 
-Do not report a large count alone as an insight. Empty search can mean
-a correct negative answer, and truncation can be useful. Prefer
-patterns with repeated avoidable retries, unresolved outcomes, or a
-clear contract mismatch.
+Empty search can be a correct negative result. Prefer repeated
+avoidable retries, unresolved outcomes, and clear contract mismatches.
 
-## Expected answer
-
-Lead with 3–7 actionable findings, strongest first. Keep aggregate
-counts separate from examples. Link each example to its record ID,
-generation, byte offset, and byte length. End with the next small
-experiment that could prove whether the top proposed improvement
-works.
+Lead with three to seven findings. End with the smallest experiment
+that could test the strongest proposed change.

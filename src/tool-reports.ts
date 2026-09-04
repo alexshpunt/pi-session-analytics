@@ -1,260 +1,196 @@
-import { createHash } from 'node:crypto';
+import type { ToolDatabase } from './tool-database.ts';
 
-import type { ToolActivityRecord } from './db.ts';
-
-/** Exact location of a canonical record in the immutable session archive. */
-export interface ToolRecordProvenance {
-	record_id: number;
-	session_id: string;
-	project_path: string;
-	source_path: string;
-	archive_generation_id: number;
-	timestamp: number | null;
-	source_byte_offset: number;
-	source_byte_length: number;
+export interface ToolFilter {
+	tool?: string;
+	provider?: string;
+	model?: string;
+	project?: string;
+	limit?: number;
 }
 
-/** Aggregate recorded outcomes for one tool. */
-export interface ToolSummaryRow {
-	tool_name: string;
-	calls: number;
-	matched_results: number;
-	successes: number;
-	failures: number;
-	incomplete: number;
-	failure_rate: number;
+/** Aggregate recorded tool calls, results, hard errors, and incomplete calls. */
+export function tool_summary(
+	db: ToolDatabase,
+	filter: ToolFilter = {},
+): Array<Record<string, unknown>> {
+	const { where, values } = call_filter(filter, 'calls');
+	return db.raw
+		.prepare(`
+		SELECT calls.tool_name,
+			COUNT(*) AS calls,
+			COUNT(results.id) AS results,
+			SUM(CASE WHEN results.is_error = 1 THEN 1 ELSE 0 END) AS hard_errors,
+			SUM(CASE WHEN results.id IS NULL THEN 1 ELSE 0 END) AS incomplete
+		FROM tool_calls calls
+		JOIN sessions ON sessions.id = calls.session_id
+		LEFT JOIN tool_results results
+			ON results.session_id = calls.session_id
+			AND results.tool_call_id = calls.tool_call_id
+		${where}
+		GROUP BY calls.tool_name
+		ORDER BY calls DESC, calls.tool_name
+		LIMIT ?
+	`)
+		.all(...values, filter.limit ?? 100) as Array<
+		Record<string, unknown>
+	>;
 }
 
-/** Repeated recorded failure evidence with every contributing result location. */
-export interface ToolFailureRow {
-	tool_name: string;
-	fingerprint: string;
-	evidence: string;
-	count: number;
-	occurrences: ToolRecordProvenance[];
+/** Group tool-call argument shapes without exposing argument values. */
+export function argument_report(
+	db: ToolDatabase,
+	filter: ToolFilter = {},
+): Array<Record<string, unknown>> {
+	const { where, values } = call_filter(filter, 'calls');
+	return db.raw
+		.prepare(`
+		SELECT calls.tool_name, calls.argument_shape, COUNT(*) AS calls
+		FROM tool_calls calls
+		JOIN sessions ON sessions.id = calls.session_id
+		${where}
+		GROUP BY calls.tool_name, calls.argument_shape
+		ORDER BY calls DESC, calls.tool_name, calls.argument_shape
+		LIMIT ?
+	`)
+		.all(...values, filter.limit ?? 100) as Array<
+		Record<string, unknown>
+	>;
 }
 
-/** One deterministic argument key frequency. */
-export interface ToolArgumentKeyRow {
-	tool_name: string;
-	key: string;
-	calls: number;
+/** Return recorded hard errors and calls whose result is absent. */
+export function failure_report(
+	db: ToolDatabase,
+	filter: ToolFilter = {},
+): Array<Record<string, unknown>> {
+	const { where, values } = call_filter(filter, 'calls');
+	const condition = where ? `${where} AND` : 'WHERE';
+	return db.raw
+		.prepare(`
+		SELECT calls.session_id, calls.tool_call_id, calls.tool_name,
+			calls.turn_index, calls.event_index AS call_event_index,
+			calls.timestamp AS call_timestamp,
+			results.event_index AS result_event_index,
+			results.timestamp AS result_timestamp,
+			CASE WHEN results.is_error = 1 THEN 'hard_error' ELSE 'incomplete' END AS failure_kind,
+			results.error_fingerprint,
+			COALESCE(results.source_path, calls.source_path) AS source_path,
+			COALESCE(results.source_byte_offset, calls.source_byte_offset) AS source_byte_offset
+		FROM tool_calls calls
+		JOIN sessions ON sessions.id = calls.session_id
+		LEFT JOIN tool_results results
+			ON results.session_id = calls.session_id
+			AND results.tool_call_id = calls.tool_call_id
+		${condition} (results.is_error = 1 OR results.id IS NULL)
+		ORDER BY COALESCE(results.timestamp, calls.timestamp) DESC, calls.session_id, calls.event_index
+		LIMIT ?
+	`)
+		.all(...values, filter.limit ?? 100) as Array<
+		Record<string, unknown>
+	>;
 }
 
-/** One deterministic argument shape with every contributing call location. */
-export interface ToolArgumentShapeRow {
-	tool_name: string;
-	shape: string;
-	calls: number;
-	occurrences: ToolRecordProvenance[];
-}
-
-/** Build per-tool call and recorded outcome totals. */
-export function summarize_tools(
-	activity: Iterable<ToolActivityRecord>,
-): ToolSummaryRow[] {
-	const rows = new Map<
-		string,
-		Omit<ToolSummaryRow, 'failure_rate'>
-	>();
-	for (const record of activity) {
-		const row = rows.get(record.tool_name) ?? {
-			tool_name: record.tool_name,
-			calls: 0,
-			matched_results: 0,
-			successes: 0,
-			failures: 0,
-			incomplete: 0,
-		};
-		row.calls++;
-		if (record.result_record_id === null) row.incomplete++;
-		else {
-			row.matched_results++;
-			if (record.is_error === 1) row.failures++;
-			else row.successes++;
-		}
-		rows.set(record.tool_name, row);
-	}
-	return [...rows.values()]
-		.map((row) => ({
-			...row,
-			failure_rate:
-				row.matched_results === 0
-					? 0
-					: row.failures / row.matched_results,
-		}))
-		.sort(
-			(left, right) =>
-				right.calls - left.calls ||
-				left.tool_name.localeCompare(right.tool_name),
+/** Infer same-turn recovery from the next recorded tool call after each failure. */
+export function recovery_report(
+	db: ToolDatabase,
+	filter: ToolFilter = {},
+): Array<Record<string, unknown>> {
+	const failures = failure_report(db, {
+		...filter,
+		limit: filter.limit ?? 100,
+	});
+	const next_call = db.raw.prepare(`
+		SELECT calls.tool_call_id, calls.tool_name, calls.event_index, calls.timestamp
+		FROM tool_calls calls
+		JOIN tool_results results
+			ON results.session_id = calls.session_id
+			AND results.tool_call_id = calls.tool_call_id
+		WHERE calls.session_id = ? AND calls.turn_index = ?
+			AND calls.event_index > ? AND results.is_error = 0
+		ORDER BY (calls.tool_name = ?) DESC, calls.event_index, calls.id
+		LIMIT 1
+	`);
+	return failures.map((failure) => {
+		const failed_index = Number(
+			failure.result_event_index ?? failure.call_event_index,
 		);
-}
-
-/** Group recorded tool errors by stable normalized evidence. */
-export function group_tool_failures(
-	activity: Iterable<ToolActivityRecord>,
-): ToolFailureRow[] {
-	const groups = new Map<string, ToolFailureRow>();
-	for (const record of activity) {
-		if (record.is_error !== 1 || record.result_record_id === null)
-			continue;
-		const evidence = normalize_failure_evidence(
-			record.result_content ??
-				record.result_details_json ??
-				'(empty error result)',
-		);
-		const fingerprint = createHash('sha256')
-			.update(`${record.tool_name}\0${evidence}`)
-			.digest('hex')
-			.slice(0, 16);
-		const key = `${record.tool_name}\0${fingerprint}`;
-		const row = groups.get(key) ?? {
-			tool_name: record.tool_name,
-			fingerprint,
-			evidence,
-			count: 0,
-			occurrences: [],
+		const next = next_call.get(
+			String(failure.session_id),
+			Number(failure.turn_index),
+			failed_index,
+			String(failure.tool_name),
+		) as Record<string, unknown> | undefined;
+		return {
+			...failure,
+			recovery_inference: next
+				? String(next.tool_name) === String(failure.tool_name)
+					? 'inferred_same_tool'
+					: 'inferred_alternate_tool'
+				: 'inferred_unresolved',
+			next_tool_call_id: next?.tool_call_id ?? null,
+			next_tool_name: next?.tool_name ?? null,
+			next_event_index: next?.event_index ?? null,
 		};
-		row.count++;
-		row.occurrences.push(result_provenance(record));
-		groups.set(key, row);
-	}
-	return [...groups.values()].sort(
-		(left, right) =>
-			right.count - left.count ||
-			left.tool_name.localeCompare(right.tool_name) ||
-			left.evidence.localeCompare(right.evidence),
-	);
+	});
 }
 
-/** Count argument paths and normalized JSON shapes without retaining values. */
-export function report_tool_arguments(
-	activity: Iterable<ToolActivityRecord>,
-): {
-	keys: ToolArgumentKeyRow[];
-	shapes: ToolArgumentShapeRow[];
-} {
-	const keys = new Map<string, ToolArgumentKeyRow>();
-	const shapes = new Map<string, ToolArgumentShapeRow>();
-	for (const record of activity) {
-		const parsed = parse_arguments(record.arguments_json);
-		for (const key of new Set(argument_paths(parsed))) {
-			const map_key = `${record.tool_name}\0${key}`;
-			const row = keys.get(map_key) ?? {
-				tool_name: record.tool_name,
-				key,
-				calls: 0,
-			};
-			row.calls++;
-			keys.set(map_key, row);
-		}
-		const shape = argument_shape(parsed);
-		const map_key = `${record.tool_name}\0${shape}`;
-		const row = shapes.get(map_key) ?? {
-			tool_name: record.tool_name,
-			shape,
-			calls: 0,
-			occurrences: [],
-		};
-		row.calls++;
-		row.occurrences.push(call_provenance(record));
-		shapes.set(map_key, row);
+/** Aggregate recorded assistant-turn usage independently from tool calls. */
+export function usage_report(
+	db: ToolDatabase,
+	options: {
+		group_by?: 'day' | 'model' | 'project';
+		limit?: number;
+	} = {},
+): Array<Record<string, unknown>> {
+	const group_by = options.group_by ?? 'day';
+	const expression =
+		group_by === 'model'
+			? "COALESCE(provider, '') || '/' || COALESCE(model, '')"
+			: group_by === 'project'
+				? 'project_path'
+				: "date(timestamp / 1000, 'unixepoch')";
+	return db.raw
+		.prepare(`
+		SELECT ${expression} AS group_value,
+			COUNT(*) AS turns,
+			SUM(input_tokens) AS input_tokens,
+			SUM(output_tokens) AS output_tokens,
+			SUM(cache_read_tokens) AS cache_read_tokens,
+			SUM(cache_write_tokens) AS cache_write_tokens,
+			SUM(total_tokens) AS total_tokens,
+			SUM(CASE WHEN cost_recorded = 1 THEN cost_total ELSE 0 END) AS recorded_cost,
+			SUM(cost_recorded) AS turns_with_recorded_cost
+		FROM usage_records
+		GROUP BY ${expression}
+		ORDER BY total_tokens DESC, group_value
+		LIMIT ?
+	`)
+		.all(options.limit ?? 100) as Array<Record<string, unknown>>;
+}
+
+function call_filter(
+	filter: ToolFilter,
+	alias: string,
+): { where: string; values: string[] } {
+	const clauses: string[] = [];
+	const values: string[] = [];
+	if (filter.tool) {
+		clauses.push(`${alias}.tool_name = ?`);
+		values.push(filter.tool);
 	}
-	const by_frequency = <
-		T extends { calls: number; tool_name: string },
-	>(
-		left: T,
-		right: T,
-	) =>
-		right.calls - left.calls ||
-		left.tool_name.localeCompare(right.tool_name);
+	if (filter.provider) {
+		clauses.push(`${alias}.provider = ?`);
+		values.push(filter.provider);
+	}
+	if (filter.model) {
+		clauses.push(`${alias}.model = ?`);
+		values.push(filter.model);
+	}
+	if (filter.project) {
+		clauses.push('sessions.project_path = ?');
+		values.push(filter.project);
+	}
 	return {
-		keys: [...keys.values()].sort(
-			(left, right) =>
-				by_frequency(left, right) ||
-				left.key.localeCompare(right.key),
-		),
-		shapes: [...shapes.values()].sort(
-			(left, right) =>
-				by_frequency(left, right) ||
-				left.shape.localeCompare(right.shape),
-		),
+		where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+		values,
 	};
-}
-
-function call_provenance(
-	record: ToolActivityRecord,
-): ToolRecordProvenance {
-	return {
-		record_id: record.call_record_id,
-		session_id: record.session_id,
-		project_path: record.project_path,
-		source_path: record.source_path,
-		archive_generation_id: record.archive_generation_id,
-		timestamp: record.timestamp,
-		source_byte_offset: record.source_byte_offset,
-		source_byte_length: record.source_byte_length,
-	};
-}
-
-function result_provenance(
-	record: ToolActivityRecord,
-): ToolRecordProvenance {
-	return {
-		record_id: record.result_record_id!,
-		session_id: record.session_id,
-		project_path: record.project_path,
-		source_path: record.source_path,
-		archive_generation_id: record.result_archive_generation_id!,
-		timestamp: record.result_timestamp,
-		source_byte_offset: record.result_source_byte_offset!,
-		source_byte_length: record.result_source_byte_length!,
-	};
-}
-
-function normalize_failure_evidence(value: string): string {
-	return value.replace(/\s+/g, ' ').trim();
-}
-
-function parse_arguments(value: string): unknown {
-	try {
-		return JSON.parse(value) as unknown;
-	} catch {
-		return Symbol.for('invalid-json');
-	}
-}
-
-function argument_paths(value: unknown, prefix = ''): string[] {
-	if (Array.isArray(value)) {
-		return value.flatMap((item) =>
-			argument_paths(item, `${prefix}[]`),
-		);
-	}
-	if (!value || typeof value !== 'object') return [];
-	return Object.entries(value as Record<string, unknown>).flatMap(
-		([key, child]) => {
-			const path = prefix ? `${prefix}.${key}` : key;
-			return [path, ...argument_paths(child, path)];
-		},
-	);
-}
-
-function argument_shape(value: unknown): string {
-	if (value === Symbol.for('invalid-json')) return 'invalid-json';
-	if (value === null) return 'null';
-	if (Array.isArray(value)) {
-		if (value.length === 0) return '[]';
-		const shapes = [...new Set(value.map(argument_shape))].sort();
-		return `[${shapes.join('|')}]`;
-	}
-	if (typeof value === 'object') {
-		const entries = Object.entries(value as Record<string, unknown>)
-			.sort(([left], [right]) => left.localeCompare(right))
-			.map(
-				([key, child]) =>
-					`${JSON.stringify(key)}:${argument_shape(child)}`,
-			);
-		return `{${entries.join(',')}}`;
-	}
-	return typeof value;
 }

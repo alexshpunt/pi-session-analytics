@@ -3,372 +3,184 @@
 [![built with vite+](https://img.shields.io/badge/built%20with-Vite+-646CFF?logo=vite&logoColor=white)](https://viteplus.dev)
 [![tested with vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 
-Archive [pi.dev](https://pi.dev) agent sessions in SQLite. Query your
-session history, token usage, tool calls, cost, and model switches.
+Compact, offline analytics for the tools used in [Pi](https://pi.dev)
+sessions.
+
+Pi Session Analytics stores ordered tool calls and results. It keeps
+complete tool payloads with lossless compression, but does not copy
+prompts, assistant replies, system messages, or reasoning. Model usage
+and recorded cost stay at assistant-turn level. The program never
+invents per-tool cost.
 
 This project is a fork of
 [pirecall](https://github.com/spences10/pirecall) by Scott Spence. It
 keeps the original MIT license and copyright notice.
 
-## Quick Start
-
-Use `pi-session-analytics` inline in Pi sessions. Tell the agent:
-
-```
-"run npx pi-session-analytics sync then show me my top 5 projects by token usage"
-
-"use npx pi-session-analytics search to find sessions where we discussed database migrations"
-
-"run npx pi-session-analytics stats and tell me how much I've spent this week"
-```
-
-The agent runs the command, gets structured output, and can answer
-follow-up questions about your session history.
-
-## Resumable session index
-
-Pi Session Analytics remains an archive: deleting a Pi JSONL session
-does not delete its history from the database. Each sync additionally
-records source-file metadata and marks missing sources as unavailable.
-Resume integrations query only live sources:
-
-```bash
-pi-session-analytics resumable --scope all --limit 100 --json
-pi-session-analytics resumable --scope project --cwd "$PWD" --query auth --json
-```
-
-The command returns a versioned object containing `schema_version`,
-`capabilities`, and compact `sessions`. Node integrations can use the
-same contract without relying on internal SQLite tables:
-
-```ts
-import { list_resumable_sessions } from 'pi-session-analytics/resumable';
-
-const result = await list_resumable_sessions({
-	scope: 'project',
-	cwd: process.cwd(),
-	query: 'auth',
-	limit: 50,
-});
-```
-
-Results contain the absolute JSONL `path`; integrations should verify
-it still exists immediately before asking Pi to switch sessions.
-Existing databases are migrated additively when opened. Run
-`pi-session-analytics sync --json` once after upgrading to stream and
-backfill session names and source metadata. The backfill is marked
-complete per file, so later syncs remain incremental.
-
-## How It Works
-
-Pi stores sessions as JSONL files in `~/.pi/agent/sessions/`. During
-sync, Pi Session Analytics first preserves every selected session in
-an owner-only, content-addressed archive at
-`~/.pi/pi-session-analytics/archive/`, then parses it into SQLite.
-Older archive generations remain available when Pi rewrites or deletes
-the source. Use `sync --archive <path>` to choose another archive
-location.
-
-SQLite table `session_records` keeps every archived JSONL record with
-its raw JSON, tree IDs, generation, source path, and exact byte range.
-Related `record_content_blocks`, `record_tool_calls`, and
-`record_tool_results` rows keep common fields directly queryable while
-IDs remain scoped to their source session.
-
-**Step 1.** Sync your sessions:
-
-```bash
-npx pi-session-analytics sync
-```
-
-**Step 2.** Pi Session Analytics incrementally imports new content and
-reports what it found:
-
-```
-Synced 24 sessions, 136 messages, 22 tool calls, 59 model changes
-```
-
-**Step 3.** Query the database with `pi-session-analytics` or raw SQL:
-
-```bash
-npx pi-session-analytics stats
-npx pi-session-analytics search "database migration"
-npx pi-session-analytics query "SELECT project_path, SUM(cost_total) FROM sessions s JOIN messages m ON m.session_id = s.id GROUP BY project_path ORDER BY 2 DESC LIMIT 5"
-```
-
-## Agent skill
-
-Install the package through Pi to load its agent skills as well as the
-CLI:
+## Install
 
 ```bash
 pi install npm:pi-session-analytics
 ```
 
-The `pi-session-analytics` skill teaches agents when to sync and
-verify, which report answers each kind of question, how to use
-read-only SQL, and how to preserve provenance and uncertainty. The
-focused `session-friction-insights` skill handles search, read, and
-stale-anchor failure analysis.
+This installs the CLI and two Pi skills. Running the package through
+`npx` works, but does not install the skills.
 
-Running the CLI only through `{npx,pnpx,bunx}` does not load package
-skills. In that case, mention `pi-session-analytics` in the prompt so
-the agent discovers commands from CLI help.
+Node.js 22 or newer is required.
+
+## Start a new database
+
+```bash
+pi-session-analytics sync --json
+pi-session-analytics verify --deep --json
+pi-session-analytics stats --json
+```
+
+The default database is `~/.pi/pi-session-analytics.db`. Sync reads
+native Pi sessions from `~/.pi/agent/sessions`.
+
+Sync identifies a logical session by its native session ID, not its
+path. Moving or copying a session does not duplicate its tool events.
+An unchanged session is skipped. An appended session is read from its
+last committed byte. Each session is committed separately, so a later
+run can continue after interruption.
+
+Use `--database <path>` or `-d <path>` with database commands. Use
+`sync --sessions <path>` for another native session root.
+
+## Move from the old archive database
+
+Migration creates a separate candidate. It does not change the old
+database or read native JSONL files.
+
+```bash
+pi-session-analytics migrate \
+  --from ~/.pi/pi-session-analytics.db \
+  --to ~/.pi/pi-session-analytics.compact.db \
+  --json
+
+pi-session-analytics verify \
+  --database ~/.pi/pi-session-analytics.compact.db \
+  --legacy ~/.pi/pi-session-analytics.db \
+  --deep \
+  --json
+```
+
+The deep comparison checks every effective legacy call and result
+against the losslessly decoded candidate. Keep the old database and
+archive until this passes, then run a native sync against the
+candidate and repeat it to confirm that the second run adds no events.
+
+## Periodic sync
+
+Install a persistent systemd user timer:
+
+```bash
+pi-session-analytics schedule install --interval 1h
+pi-session-analytics schedule status
+```
+
+The service is a `Type=oneshot` unit, so systemd does not overlap two
+scheduled runs of the same service. The CLI also uses a database lock
+to reject overlapping manual and scheduled syncs.
+
+Remove the timer with:
+
+```bash
+pi-session-analytics schedule remove
+```
+
+## Reports
+
+```bash
+pi-session-analytics tools summary --json
+pi-session-analytics tools failures --json
+pi-session-analytics tools arguments --json
+pi-session-analytics recoveries --json
+pi-session-analytics usage --group-by model --json
+pi-session-analytics usage --group-by project --json
+```
+
+`tools failures` includes recorded error results and calls with no
+recorded result. It reports an incomplete call as `incomplete`, never
+as a recorded hard error.
+
+`recoveries` labels every conclusion as inferred. It checks the next
+tool call in the same user turn and reports a same-tool retry, an
+alternate tool, or unresolved. It does not claim intent, causation, or
+active duration.
+
+Argument reports store keys and value types, not values. Usage reports
+sum only values recorded by Pi and keep priced and unpriced turns
+distinct.
+
+Reports accept `--tool`, `--provider`, `--model`, `--project`, and
+`--limit` where they apply.
+
+## SQL and payload access
+
+```bash
+pi-session-analytics schema --json
+pi-session-analytics query \
+  "SELECT tool_name, COUNT(*) AS calls FROM tool_calls GROUP BY tool_name ORDER BY calls DESC" \
+  --json
+```
+
+`query` opens SQLite in read-only and query-only mode. It accepts
+`SELECT`, `WITH`, and `PRAGMA` statements.
+
+Tool arguments and results are compressed SQLite BLOBs. Use the public
+API when you need their exact decoded value:
+
+```ts
+import { ToolDatabase } from 'pi-session-analytics';
+
+const db = new ToolDatabase('/home/me/.pi/pi-session-analytics.db', {
+	read_only: true,
+});
+
+const argumentsJson = db.read_call_arguments(
+	'session-id',
+	'tool-call-id',
+);
+const resultJson = db.read_result_payload(
+	'session-id',
+	'tool-call-id',
+);
+db.close();
+```
+
+## Stored data
+
+The compact schema has these primary tables:
+
+- `sessions`: logical session and project identity
+- `session_sources`: current path and incremental checkpoint
+- `tool_calls`: ordered calls with compressed arguments
+- `tool_results`: ordered results with full compressed content and
+  details
+- `usage_records`: recorded tokens and cost per assistant turn
+
+There are no conversation, reasoning, raw-record, archive, or
+full-text-search tables. Native Pi sessions remain the source of
+truth.
 
 ## Commands
 
-```bash
-npx pi-session-analytics sync                  # Import sessions (incremental)
-npx pi-session-analytics stats                 # Session/message/token/cost counts
-npx pi-session-analytics sessions              # List recent sessions
-npx pi-session-analytics resumable --json      # List live sessions for resume UIs
-npx pi-session-analytics verify --deep          # Verify database and archived bytes
-npx pi-session-analytics search <term>         # Full-text search across all archived records
-npx pi-session-analytics tools                 # Tool calls, failures, and argument shapes
-npx pi-session-analytics recoveries            # Inferred same-turn recovery sequences
-npx pi-session-analytics usage                 # Recorded tokens and cost comparisons
-npx pi-session-analytics recall <term>         # LLM-optimised context retrieval
-npx pi-session-analytics query "<sql>"         # Read-only SQL against the database
-npx pi-session-analytics schema                # Show database table structure
-npx pi-session-analytics compact               # Prune old tool results
+```text
+sync        Incrementally import native Pi tool activity
+migrate     Build a compact candidate from a legacy database
+verify      Check integrity and lossless payload round trips
+stats       Show row and payload sizes
+tools       Show summary, failures, or argument shapes
+recoveries  Show inferred same-turn recovery
+usage       Group recorded turn usage by day, model, or project
+query       Run read-only SQL
+schema      Show the public SQLite schema
+schedule    Install, inspect, or remove periodic sync
 ```
 
-All commands support `--json` for programmatic output and
-`-d, --db <path>` to use a custom database path (default:
-`~/.pi/pi-session-analytics.db`).
-
-`search --json` returns
-`{ schema_version, kind, query, count, results }`; every result
-includes the source path, archive generation, record type, and byte
-range. `query --json` returns
-`{ schema_version, kind, sql, columns, count, rows }`. Both envelopes
-use `schema_version: 1`, including empty results.
-
-Tool reports use canonical archived records:
-
-```bash
-npx pi-session-analytics tools                       # calls and recorded outcomes
-npx pi-session-analytics tools failures              # grouped recorded errors
-npx pi-session-analytics tools arguments             # argument keys and value-free shapes
-npx pi-session-analytics tools --provider openai --model gpt-5.4 --after 2026-09-01
-```
-
-Every report accepts `--project`, `--session`, `--provider`,
-`--model`, `--after`, and `--before`. JSON output uses the versioned
-`tool-summary`, `tool-failures`, or `tool-arguments` envelope. Failure
-and argument groups include exact canonical record and archive byte
-provenance. Argument reports keep keys and data types, not argument
-values.
-
-Reports use each source's effective history: append generations add
-only their suffix, while a rewrite replaces the earlier snapshot. This
-keeps archived history intact without counting unchanged calls twice.
-A missing result is reported as incomplete, never guessed to be a
-failure.
-
-Recovery reports are deliberately labelled **inferred**. For each
-recorded tool failure, the report looks only until the next user
-message. It prefers the first successful retry of the same tool, then
-the first successful alternate tool, and otherwise reports the failure
-as unresolved. It reports intervening tool calls and exact provenance;
-it does not claim intent, causation, or time-to-recovery.
-
-```bash
-npx pi-session-analytics recoveries --group model
-npx pi-session-analytics recoveries --group project --after 2026-09-01
-```
-
-Recovery comparisons can group by model, provider, project, tool, or
-UTC day.
-
-Usage reports sum only the token and cost fields recorded by Pi:
-
-```bash
-npx pi-session-analytics usage --group model
-npx pi-session-analytics usage --group provider
-npx pi-session-analytics usage --group project
-npx pi-session-analytics usage --group day --after 2026-09-01 --before 2026-10-01
-npx pi-session-analytics usage --group model --details --json
-```
-
-The same time, session, project, provider, and model filters are
-available for `recoveries` and `usage`. Usage can include every
-contributing archive record with `--details`. Reports count priced and
-unpriced messages separately; cost is `null` when no contributing
-message recorded one. Missing prices are not looked up or estimated,
-and event timestamps are not presented as exact active-session
-duration.
-
-## Sync checkpoints and verification
-
-Sync commits each selected session source with its archive generation,
-legacy compatibility rows, canonical records, and sync state. If the
-process stops, the next sync reuses every committed source and
-continues with the rest.
-
-For an isolated import, pass
-`sync --sessions <root> --archive <root> --db <file>`.
-
-```bash
-npx pi-session-analytics verify
-npx pi-session-analytics verify --deep
-npx pi-session-analytics verify --deep --json
-```
-
-The normal check covers SQLite integrity, foreign keys, current
-generation links, canonical indexing, FTS row counts, and report
-provenance. `--deep` also hashes every content-addressed chunk,
-reconstructs and hashes every generation, compares every source still
-present with its current generation, and rejects missing or untracked
-chunk files. A failed check sets a non-zero exit status.
-
-## Schema migrations
-
-`src/schema.sql` creates the base database schema. `src/schema.ts`
-loads that file, checks `PRAGMA user_version`, and transactionally
-applies newer SQL files from `src/migrations/`. Builds copy the schema
-and migrations into `dist`. Older unversioned Pi Session Analytics
-databases are detected and adopted without deleting archive data.
-
-## Database Schema
-
-```mermaid
-erDiagram
-    sessions ||--o{ messages : contains
-    sessions ||--o{ tool_calls : contains
-    sessions ||--o{ tool_results : contains
-    sessions ||--o{ model_changes : tracks
-    messages ||--o{ tool_calls : has
-    messages ||--o{ tool_results : has
-    tool_calls ||--o{ tool_results : produces
-
-    sessions {
-        text id PK
-        text project_path
-        text cwd
-        int first_timestamp
-        int last_timestamp
-    }
-
-    messages {
-        text id PK
-        text session_id FK
-        text parent_id
-        text type
-        text provider
-        text model
-        text content_text
-        text content_json
-        text thinking
-        int timestamp
-        int input_tokens
-        int output_tokens
-        int cache_read_tokens
-        int cache_write_tokens
-        real cost_total
-    }
-
-    tool_calls {
-        text id PK
-        text message_id FK
-        text session_id FK
-        text tool_name
-        text tool_input
-        int timestamp
-    }
-
-    tool_results {
-        int id PK
-        text tool_call_id FK
-        text message_id FK
-        text session_id FK
-        text content
-        int is_error
-        int timestamp
-    }
-
-    model_changes {
-        text id PK
-        text session_id FK
-        text parent_id
-        text provider
-        text model_id
-        int timestamp
-    }
-
-    sync_state {
-        text file_path PK
-        int last_modified
-        int last_byte_offset
-    }
-```
-
-### Model/Provider Tracking
-
-Tracks mid-session model switches from `~/.pi/agent/sessions/`. Pi
-Session Analytics records every switch with its provider and model ID.
-
-**Why track model changes?**
-
-- See which models you actually use vs which you think you use
-- Compare cost across providers for similar tasks
-- Debug sessions where model switches caused behaviour changes
-
-## Example Queries
-
-```sql
--- Cost by session
-SELECT s.project_path, s.id, SUM(m.cost_total) as cost
-FROM sessions s
-JOIN messages m ON m.session_id = s.id
-GROUP BY s.id
-ORDER BY cost DESC
-LIMIT 10;
-
--- Token usage by day
-SELECT DATE(timestamp/1000, 'unixepoch') as day,
-  SUM(input_tokens + output_tokens) as tokens,
-  ROUND(SUM(cost_total), 4) as cost
-FROM messages
-GROUP BY day
-ORDER BY day DESC;
-
--- Model usage across providers
-SELECT provider, model_id, COUNT(*) as switches
-FROM model_changes
-GROUP BY 1, 2
-ORDER BY switches DESC;
-
--- Most used models
-SELECT model, COUNT(*) as count
-FROM messages
-WHERE model IS NOT NULL
-GROUP BY model
-ORDER BY count DESC;
-
--- Tool usage breakdown
-SELECT tool_name, COUNT(*) as count
-FROM tool_calls
-GROUP BY tool_name
-ORDER BY count DESC;
-
--- Files read in a session
-SELECT tc.tool_name, json_extract(tc.tool_input, '$.file_path') as file
-FROM tool_calls tc
-WHERE tc.tool_name = 'read' AND tc.session_id = 'your-session-id';
-
--- Cost by provider
-SELECT m.provider, ROUND(SUM(m.cost_total), 4) as cost,
-  SUM(m.input_tokens + m.output_tokens) as tokens
-FROM messages m
-WHERE m.provider IS NOT NULL
-GROUP BY m.provider
-ORDER BY cost DESC;
-```
-
-## Requirements
-
-- Node.js 22+
+All structured output uses a versioned JSON envelope when `--json` is
+set.
 
 ## License
 

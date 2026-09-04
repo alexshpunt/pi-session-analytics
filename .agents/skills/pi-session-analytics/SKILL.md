@@ -2,12 +2,10 @@
 name: pi-session-analytics
 description:
   Operate Pi Session Analytics end to end. Use this skill whenever the
-  user asks to find or recall past Pi work, inspect session history,
-  compare recorded token use or cost, investigate tool calls or
-  failures, infer recovery, list resumable sessions, sync or verify
-  the session archive, query the analytics SQLite database, or decide
-  what session-analysis data can be removed. Use it even when the user
-  describes the question without naming pi-session-analytics.
+  user asks about recorded Pi tool use, tool failures, incomplete
+  calls, inferred recovery, model or project token use, compact
+  database sync, migration, verification, periodic scheduling,
+  read-only SQL, or safe removal of old session-analysis data.
 compatibility:
   Requires Node.js 22+ and either this repository or an installed
   pi-session-analytics CLI.
@@ -15,283 +13,195 @@ compatibility:
 
 # Pi Session Analytics
 
-Use Pi Session Analytics to answer questions from archived native Pi
-sessions. Treat sessions, the SQLite database, and the
-content-addressed archive as evidence sources. Give the user the
-answer or insight, not a dump of commands and rows.
+Use Pi Session Analytics for compact, offline analysis of Pi tool
+activity. Give the user the answer or insight, not a command dump.
 
 ## Ground rules
 
-- Prefer `--json` when an agent will interpret the result.
-- Never alter native Pi JSONL sessions.
-- `sync` reads native sessions, archives selected bytes, and updates
-  SQLite. It does not delete source sessions.
-- Use the database and archive as a pair. A custom database must use
-  the archive that was populated with it.
-- Treat `is_error = 1` as a recorded tool failure. A missing tool
-  result is incomplete, not a failure.
-- Always label recovery as inferred. The heuristic does not prove
-  intent or causation.
-- Report only tokens and prices recorded by Pi. Do not invent missing
-  prices or call timestamp spans active work duration.
-- Keep raw session content and generated private reports out of Git
-  unless the user explicitly asks to publish them.
-- Ask before `compact` without `--dry-run`, deleting sessions, or
-  deleting the database, archive, or snapshots.
+- Prefer `--json` for agent-readable output.
+- Never change native Pi JSONL sessions.
+- The compact database stores tool calls, full compressed tool
+  results, and assistant-turn usage. It does not store conversation or
+  reasoning text.
+- Treat `is_error = 1` as a recorded hard failure. A missing result is
+  incomplete, not a recorded failure.
+- Always label recovery as inferred. Sequence does not prove intent or
+  causation.
+- Use only tokens and prices recorded by Pi. Never assign
+  assistant-turn cost to individual tool calls or turn timestamp gaps
+  into active duration.
+- Ask before deleting a database, old archive, snapshot, native
+  session, or report.
 
 ## Choose the executable
 
-Inside this repository, build once after source changes and use the
-local code:
+Inside this repository:
 
 ```bash
 pnpm build
-node dist/index.js <command>
+PSA="node dist/index.js"
 ```
 
-Outside the repository, use the installed package runner:
+Outside it:
 
 ```bash
-npx pi-session-analytics <command>
+PSA="npx pi-session-analytics"
 ```
 
-Set one shell variable when several commands follow, so every command
-uses the same executable:
+Defaults:
 
-```bash
-PSA="node dist/index.js" # repository
-# PSA="npx pi-session-analytics" # installed package
-```
+- native sessions: `~/.pi/agent/sessions/`
+- compact database: `~/.pi/pi-session-analytics.db`
 
-Do not use `stats` to test whether a database exists because opening
-the database may create it. Check the path first:
-
-```bash
-test -f "$HOME/.pi/pi-session-analytics.db"
-```
-
-The defaults are:
-
-- sessions: `~/.pi/agent/sessions/`
-- database: `~/.pi/pi-session-analytics.db`
-- archive: `~/.pi/pi-session-analytics/archive/`
-
-All commands accept `--db <path>` (or `-d <path>`). Commands that read
-or write archived bytes also accept `--archive <path>`.
+Use `--database <path>` (or `-d`) with database commands.
 
 ## Prepare trustworthy data
 
-### Routine current answer
-
-If the database is missing, or the user asks about the latest
-sessions, sync before querying:
+For a current answer, sync and run the normal check:
 
 ```bash
 $PSA sync --json
 $PSA verify --json
 ```
 
-Sync is incremental and commits one source at a time. If it stops,
-rerun the same command; committed sources are reused.
+Sync selects only files with a valid native Pi session header. It
+identifies a logical session by session ID, not absolute path. It
+skips unchanged sources, reads safe appends from the last committed
+byte, deduplicates moved or copied sessions, and commits one session
+at a time.
 
-Do not sync just because a historical query returned no rows. First
-check the query, filters, and database path.
-
-### Fixed, reproducible corpus
-
-Use a snapshot when the result must stay reproducible while live
-sessions may still change. Put temporary material under
-`.agents/tmp/`:
+Use deep verification after a large import, before an exact payload
+claim, or before deleting old storage:
 
 ```bash
-mkdir -p .agents/tmp/<task>/corpus
-cp -a --reflink=auto "$HOME/.pi/agent/sessions/." .agents/tmp/<task>/corpus/
-$PSA sync --json \
-  --sessions .agents/tmp/<task>/corpus \
-  --db .agents/tmp/<task>/sessions.db \
-  --archive .agents/tmp/<task>/archive
-$PSA verify --deep --json \
-  --db .agents/tmp/<task>/sessions.db \
-  --archive .agents/tmp/<task>/archive
+$PSA verify --deep --json
 ```
 
-Use independent copies, not hard links: a live append through a hard
-link would change the supposed snapshot.
+Deep verification decompresses and hashes every stored argument and
+result. Stop if `pass` is false.
 
-### Verification level
+## Choose the report
 
-- Run `verify --json` for a routine database consistency check.
-- Run `verify --deep --json` before making archive-byte or exact
-  provenance claims, after a large import, or before deleting any
-  source material.
-- A deep check hashes every chunk, reconstructs generations, compares
-  present sources, and checks the complete archive file set. It can
-  take minutes on a large corpus.
-- Stop and report the failed checks when `passed` is false. Do not
-  continue as if the evidence were sound.
+| Need                                     | Command                          |
+| ---------------------------------------- | -------------------------------- |
+| Counts and storage size                  | `stats --json`                   |
+| Tool volume and outcomes                 | `tools summary --json`           |
+| Recorded errors and incomplete calls     | `tools failures --json`          |
+| Argument keys and value-free shapes      | `tools arguments --json`         |
+| Inferred same-turn recovery              | `recoveries --json`              |
+| Recorded usage by day, model, or project | `usage --group-by model --json`  |
+| Public tables and columns                | `schema --json`                  |
+| Custom aggregate                         | `query "<read-only SQL>" --json` |
+| Install recurring sync                   | `schedule install --interval 1h` |
 
-## Choose the command that answers the question
+Tool reports accept `--tool`, `--provider`, `--model`, `--project`,
+and `--limit`.
 
-| User need                                    | Command                                         |
-| -------------------------------------------- | ----------------------------------------------- |
-| Overall counts                               | `stats --json`                                  |
-| Recent archived sessions                     | `sessions --json --limit <n>`                   |
-| Sessions that still exist and can be resumed | `resumable --scope project --cwd "$PWD" --json` |
-| Find exact archived records                  | `search "<fts query>" --context 2 --json`       |
-| Get compact message context for an answer    | `recall "<query>"`                              |
-| Tool volume and recorded outcomes            | `tools summary --json`                          |
-| Group recorded tool errors                   | `tools failures --json`                         |
-| Inspect argument keys and value-free shapes  | `tools arguments --json`                        |
-| Compare inferred post-failure recovery       | `recoveries --group tool --json`                |
-| Compare recorded tokens and cost             | `usage --group model --json`                    |
-| Inspect available tables and columns         | `schema --json` or `schema <table> --json`      |
-| Ask a custom aggregate question              | `query "<read-only SQL>" --json --limit <n>`    |
-| Check database and archive integrity         | `verify --deep --json`                          |
-| Estimate database compaction                 | `compact --dry-run --json`                      |
+### Failure and recovery
 
-### Search and recall
+`tools failures` reports two different states:
 
-Use `search` when record type, archive generation, byte provenance,
-date, sorting, or canonical context matters:
+- `hard_error`: Pi recorded `isError: true` on the result;
+- `incomplete`: the call has no stored result.
+
+Do not merge them into one failure count.
+
+`recoveries` finds the next tool call in the same user turn. Its
+values begin with `inferred_`: same tool, alternate tool, or
+unresolved. Never describe these as a proven fix or time-to-recovery.
+
+### Usage
 
 ```bash
-$PSA search '"database migration" OR schema' \
-  --project "$PWD" --context 2 --sort time --limit 20 --json
+$PSA usage --group-by day --json
+$PSA usage --group-by model --json
+$PSA usage --group-by project --json
 ```
 
-FTS supports `AND`, `OR`, `NOT`, quoted phrases, and `prefix*`. Useful
-filters are `--project`, `--session`, `--type`, and `--after`.
+Usage is stored per assistant message and is independent of tool rows.
+State how many turns recorded a price. Do not estimate absent prices.
 
-Use `recall` for a small LLM-oriented message window. It always
-returns JSON but uses the legacy message view and does not provide the
-full canonical provenance contract. Prefer `search` for auditable
-evidence.
+### SQL and exact payloads
 
-A zero-result search is a successful negative result, not a recorded
-failure. Broaden a phrase or remove one filter at a time. Do not claim
-that the subject never occurred unless the search scope and terms
-justify that claim.
+Inspect `schema --json` before a non-trivial query. `query` accepts
+`SELECT`, `WITH`, and `PRAGMA`, opens SQLite read-only, and sets
+query-only mode.
 
-### Sessions and resumable sessions
+Arguments and results are compressed BLOBs. Use the public API for an
+exact value:
 
-`sessions` lists archived history, including sources that may no
-longer exist. `resumable` returns only live source paths suitable for
-a resume UI. Before switching a session, check that its returned
-absolute JSONL path still exists.
+```ts
+import { ToolDatabase } from 'pi-session-analytics';
 
-### Tool reports
+const db = new ToolDatabase('/path/to/tools.db', { read_only: true });
+const args = db.read_call_arguments('session-id', 'call-id');
+const result = db.read_result_payload('session-id', 'call-id');
+db.close();
+```
 
-All tool reports support `--project`, `--session`, `--provider`,
-`--model`, `--after`, and `--before`.
+Keep decoded private payloads out of Git unless the user explicitly
+asks to publish them.
+
+## Migrate an old archive database
+
+Migration reads the old SQLite effective-record views and creates a
+separate compact candidate. It does not parse native JSONL or change
+the old database.
 
 ```bash
-$PSA tools summary --top 20 --json
-$PSA tools failures --project "$PWD" --top 20 --json
-$PSA tools arguments --provider openai --model gpt-5.4 --json
+$PSA migrate --from <old.db> --to <candidate.db> --json
+$PSA verify --database <candidate.db> --legacy <old.db> --deep --json
 ```
 
-Tool summaries separate calls, matched results, successes, recorded
-failures, and incomplete calls. Argument reports expose keys and
-value-free shapes; use failure reports when exact evidence and archive
-provenance are needed.
+The deep comparison must match all sessions, effective calls,
+effective results, usage records, and every decoded tool payload.
+Then:
 
-### Recovery reports
+1. sync the candidate from the real native session root;
+2. repeat sync and require `events_added: 0`;
+3. deep-verify the caught-up candidate;
+4. install and exercise the periodic timer;
+5. only then ask for the exact destructive cutover or cleanup.
+
+Never sync the old snapshot-based database directly from the native
+session root. Its old source identity is path-based and can duplicate
+data.
+
+## Periodic sync
 
 ```bash
-$PSA recoveries --group tool --after 2026-09-01 --json
+$PSA schedule install --interval 1h
+$PSA schedule status
 ```
 
-The report looks only until the next user message. It prefers the
-first successful retry of the same tool, then the first successful
-alternate tool, otherwise unresolved. Describe these as observed
-sequence patterns or inferred recovery, never as proven cause, intent,
-or time-to-recovery.
+The generated systemd user service is `Type=oneshot`, and the CLI also
+takes a per-database sync lock. Use `schedule remove` to remove it.
 
-### Usage and cost
+## Deletion boundaries
 
-```bash
-$PSA usage --group provider --json
-$PSA usage --group project --after 2026-09-01 --before 2026-10-01 --json
-$PSA usage --group model --details --json
-```
+Before deletion, show separate sizes for:
 
-State how many contributing messages were priced and unpriced. A
-`null` cost means no contributing record had a price. `--details`
-includes every contributing canonical record with archive provenance.
+- native sessions;
+- compact candidate;
+- old database;
+- old archive;
+- frozen snapshots;
+- saved private reports.
 
-### Read-only SQL
+A successful migration check permits a cutover; it is not permission
+to delete. Ask the user to approve the exact paths. Native sessions
+remain the source of truth and should normally stay.
 
-Inspect the live schema before writing a non-trivial query:
+## Recurring friction
 
-```bash
-$PSA schema --json
-$PSA schema effective_session_records --json
-$PSA query 'SELECT record_type, COUNT(*) AS count FROM effective_session_records GROUP BY record_type ORDER BY count DESC' --json --limit 100
-```
-
-`query` opens SQLite read-only and accepts only row-returning
-statements. Prefer `effective_session_records` and canonical detail
-tables for current analysis. Effective history adds append suffixes
-but replaces superseded rewritten snapshots, so unchanged records are
-not counted twice. Use raw `session_records` only when archived
-generations themselves are the subject.
-
-## Preserve provenance
-
-For an evidence-backed claim, retain:
-
-- canonical record ID;
-- source path and session ID;
-- archive generation ID;
-- source byte offset and byte length;
-- recorded versus inferred status.
-
-`search`, tool failure reports, recovery reports, and detailed usage
-reports expose the relevant provenance. Deep verification proves the
-archive can reconstruct those bytes; it does not prove an inferred
-interpretation.
-
-Do not paste private raw arguments or session text into a public file.
-Summarize the pattern and keep exact evidence in an ignored local
-report.
-
-## Analyze recurring friction
-
-When the user asks why `search`, `read`, or edit tools fail, which
-stale anchors recur, or how agents recover, also read
-`../session-friction-insights/SKILL.md`. Run its analyzer only after
-the selected database and archive pass verification. Its empty-result
-and recovery categories are deliberately inferred.
-
-## Compact or delete data
-
-Start with a dry run:
-
-```bash
-$PSA compact --older-than 30 --dry-run --json
-```
-
-`compact` changes the SQLite database, so run it without `--dry-run`
-only after the user approves that exact mutation. It does not replace
-a retention decision about native sessions, snapshots, or the
-immutable archive.
-
-Before any deletion, show separate sizes for native sessions,
-database, archive, snapshots, and saved reports. Let the user choose
-exactly which layers to keep. Reports are not a backup unless they
-contain everything the user wants to retain.
+For tool failure clusters, empty-result friction, stale anchors, and
+inferred recovery patterns, also read
+`../session-friction-insights/SKILL.md`. The analyzer must use a
+verified compact database.
 
 ## Answer the user
 
-Lead with the requested answer. Then state:
-
-1. the corpus and freshness used;
-2. which facts are recorded and which are inferred;
-3. the smallest useful aggregate;
-4. exact provenance for representative evidence when the claim needs
-   auditability;
-5. any missing prices, incomplete results, failed verification, or
-   scope limits.
-
-Do not make the user interpret a raw JSON payload unless they asked
-for it.
+Lead with the requested result. State the data freshness and scope,
+keep recorded facts separate from inference, mention missing prices or
+incomplete results, and include session/call/source coordinates for
+representative evidence when useful.

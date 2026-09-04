@@ -1,5 +1,5 @@
-import re
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -18,41 +18,33 @@ class PiSessionAnalyticsSkillTests(unittest.TestCase):
     def test_frontmatter_names_the_general_skill(self):
         self.assertRegex(self.skill, r"(?m)^name: pi-session-analytics$")
         description = self.skill.split("---", 2)[1]
-        for trigger in ("past Pi work", "token", "tool calls", "sync", "verify"):
+        for trigger in ("tool use", "token", "sync", "migration", "verification"):
             self.assertIn(trigger, description)
 
     def test_every_cli_command_is_routed(self):
         commands = set(re.findall(r"export const (\w+) = defineCommand", self.cli))
         commands.discard("main")
         missing = sorted(
-            command for command in commands if f"`{command}" not in self.skill
+            command for command in commands if command not in self.skill_text
         )
         self.assertEqual([], missing)
 
-    def test_isolated_sync_keeps_database_and_archive_together(self):
-        snapshot_section = self.skill.split("### Fixed, reproducible corpus", 1)[1]
-        self.assertIn("--sessions .agents/tmp/<task>/corpus", snapshot_section)
-        self.assertIn("--db .agents/tmp/<task>/sessions.db", snapshot_section)
-        self.assertIn("--archive .agents/tmp/<task>/archive", snapshot_section)
-        self.assertIn("not hard links", snapshot_section)
-
     def test_evidence_rules_preserve_uncertainty(self):
         self.assertIn(
-            "Treat `is_error = 1` as a recorded tool failure", self.skill_text
+            "Treat `is_error = 1` as a recorded hard failure", self.skill_text
         )
-        self.assertIn(
-            "A missing tool result is incomplete, not a failure", self.skill_text
-        )
+        self.assertIn("A missing result is incomplete", self.skill_text)
         self.assertIn("Always label recovery as inferred", self.skill_text)
-        self.assertIn("Do not invent missing prices", self.skill_text)
-        self.assertIn("Deep verification proves", self.skill_text)
+        self.assertIn("Never assign assistant-turn cost", self.skill_text)
+        self.assertIn("Never change native Pi JSONL sessions", self.skill_text)
 
-    def test_mutating_cleanup_requires_user_approval(self):
-        self.assertIn("compact --older-than 30 --dry-run --json", self.skill)
+    def test_migration_keeps_the_old_store_until_verified(self):
+        self.assertIn("creates a separate compact candidate", self.skill_text)
+        self.assertIn("--legacy <old.db> --deep", self.skill_text)
         self.assertIn(
-            "only after the user approves that exact mutation", self.skill_text
+            "only then ask for the exact destructive cutover", self.skill_text
         )
-        self.assertIn("Before any deletion, show separate sizes", self.skill_text)
+        self.assertIn("Before deletion, show separate sizes", self.skill_text)
 
     def test_npm_package_exposes_both_agent_skills(self):
         package = json.loads((REPO_ROOT / "package.json").read_text())
@@ -61,18 +53,16 @@ class PiSessionAnalyticsSkillTests(unittest.TestCase):
             "./.agents/skills/session-friction-insights",
         }
         self.assertEqual(expected, set(package["pi"]["skills"]))
-        self.assertTrue(
-            {path.removeprefix("./") for path in expected}.issubset(
-                set(package["files"])
-            )
+        files = set(package["files"])
+        self.assertIn(".agents/skills/pi-session-analytics/SKILL.md", files)
+        self.assertIn(".agents/skills/session-friction-insights/SKILL.md", files)
+        self.assertIn(
+            ".agents/skills/session-friction-insights/scripts/analyze.py", files
         )
 
     def test_friction_analysis_routes_to_the_focused_skill(self):
         self.assertIn("../session-friction-insights/SKILL.md", self.skill)
-        self.assertIn(
-            "only after the selected database and archive pass verification",
-            self.skill_text,
-        )
+        self.assertIn("verified compact database", self.skill_text)
 
 
 if __name__ == "__main__":
