@@ -182,6 +182,14 @@ schedule    Install, inspect, or remove periodic sync
 All structured output uses a versioned JSON envelope when `--json` is
 set.
 
+## Contributing
+
+Run `pnpm install` to install dependencies and the pre-commit hook.
+The hook formats staged changes with the same Vite+ formatter and
+settings as `pnpm run check`. If a file also has unstaged edits, the
+hook formats its staged version and leaves the working copy unchanged.
+Review any remaining differences with `git diff`.
+
 ## License
 
 MIT

@@ -2,6 +2,7 @@
 !.agents/skills/
 !.agents/skills/**
 node_modules/
+/.vite-hooks/_/
 dist/
 *.db
 __pycache__/
